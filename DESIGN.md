@@ -67,6 +67,7 @@ BerryPoker is a web-based Texas Hold'em poker game supporting 2-9 players over a
 ```
 BerryPoker/
 ├── main.py                 # FastAPI application entry point
+├── config.py               # Configuration (env variables)
 ├── game/
 │   ├── poker.py            # Card and Deck classes
 │   ├── table.py            # Table, Player, game logic
@@ -285,7 +286,120 @@ class Pot:
     eligible_players: Set[int]  # seats
 ```
 
+## Concurrency Control
+
+### Why Locks Are Needed
+
+Multiple WebSocket connections can process messages concurrently in FastAPI's async environment. Without locks, race conditions can occur:
+
+- Two players acting simultaneously could corrupt game state
+- Room creation/deletion during iteration could cause errors
+- Database writes could conflict
+
+### Lock Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  rooms_global_lock                   │
+│   (asyncio.Lock for room creation/deletion)         │
+└─────────────────────────────────────────────────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         ▼               ▼               ▼
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│ room_lock_1 │  │ room_lock_2 │  │ room_lock_3 │
+│ (per-room)  │  │ (per-room)  │  │ (per-room)  │
+└─────────────┘  └─────────────┘  └─────────────┘
+                         │
+                         ▼
+              ┌─────────────────────┐
+              │    _db_lock         │
+              │ (threading.Lock for │
+              │  SQLite writes)     │
+              └─────────────────────┘
+```
+
+### Lock Types
+
+| Lock | Type | Purpose |
+|------|------|---------|
+| `rooms_global_lock` | `asyncio.Lock` | Room creation/deletion |
+| `room_locks[room_id]` | `asyncio.Lock` | Per-room game state modifications |
+| `_db_lock` | `threading.Lock` | SQLite write operations |
+
+### Lock Usage Pattern
+
+```python
+# Room-level operations
+async with room_lock:
+    result = table.process_action(player_name, action, amount)
+    # ... handle result
+
+# Global room operations
+async with rooms_global_lock:
+    room_id = create_new_room()
+
+# Database writes
+with _db_lock:
+    conn.execute("INSERT ...")
+    conn.commit()
+```
+
+## Data Persistence
+
+### State Storage Strategy
+
+| Data Type | Storage | Recovery |
+|-----------|---------|----------|
+| Hand history | SQLite (permanent) | Always available |
+| Player statistics | SQLite (permanent) | Always available |
+| Room state | SQLite (temporary) | Restored on server restart |
+| WebSocket connections | Memory only | Players must reconnect |
+
+### Room State Persistence
+
+Room state is serialized to JSON and stored in the `rooms` table:
+
+```python
+# Serialize
+state = table.serialize()  # Returns dict with all game state
+state_json = json.dumps(state)
+
+# Persist every 30 seconds + after each action
+INSERT OR REPLACE INTO rooms (room_id, state_json, updated_at)
+VALUES (?, ?, CURRENT_TIMESTAMP)
+```
+
+### What Gets Persisted
+
+- Room settings (blinds, buy-ins)
+- Player positions and stacks
+- Current hand state (phase, bets, cards)
+- Action history
+- Pot calculations
+
+### Startup Recovery
+
+On server startup:
+1. Load all rooms from database updated within 24 hours
+2. Deserialize table state
+3. Recreate in-memory structures
+4. Players can reconnect to ongoing games
+
+### Cleanup
+
+- Rooms not updated in 24 hours are automatically deleted
+- Configurable via `BERRYPOKER_ROOM_CLEANUP_HOURS`
+
 ## Database Schema
+
+### Table: rooms (NEW - for persistence)
+| Column | Type | Description |
+|--------|------|-------------|
+| room_id | TEXT | Primary key |
+| state_json | TEXT | Serialized room state |
+| created_at | TIMESTAMP | Room creation time |
+| updated_at | TIMESTAMP | Last state update |
 
 ### Table: hands
 | Column | Type | Description |
@@ -378,6 +492,31 @@ class Pot:
 - Position logic: Heads-up and multi-player
 - Side pots: Multiple all-in scenarios
 
+## Configuration
+
+All settings can be configured via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BERRYPOKER_HOST` | `0.0.0.0` | Server bind address |
+| `BERRYPOKER_PORT` | `8080` | Server port |
+| `BERRYPOKER_CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated) |
+| `BERRYPOKER_DATABASE_PATH` | `./berrypoker.db` | SQLite database path |
+| `BERRYPOKER_ROOM_CLEANUP_HOURS` | `24` | Hours before inactive rooms are deleted |
+| `BERRYPOKER_PERSIST_INTERVAL` | `30` | Seconds between room state persistence |
+| `BERRYPOKER_PRODUCTION` | `false` | Enable production mode |
+| `BERRYPOKER_DEBUG` | `false` | Enable debug logging |
+
+### Example Production Configuration
+
+```bash
+export BERRYPOKER_HOST=0.0.0.0
+export BERRYPOKER_PORT=8080
+export BERRYPOKER_CORS_ORIGINS=https://berrypoker.com,https://www.berrypoker.com
+export BERRYPOKER_DATABASE_PATH=/var/lib/berrypoker/data.db
+export BERRYPOKER_PRODUCTION=true
+```
+
 ## Deployment
 
 ### Local Development
@@ -396,6 +535,151 @@ pytest tests/ -v
 1. Start server on host machine
 2. Find host's local IP (e.g., `192.168.1.100`)
 3. Other players connect to `http://192.168.1.100:8080`
+
+### Production Deployment (Domain)
+
+#### Architecture for Public Internet
+```
+┌─────────────┐      ┌─────────────┐      ┌──────────────┐
+│   Browser   │──────│   Nginx     │──────│  BerryPoker  │
+│  (Client)   │ HTTPS│  (Reverse   │ HTTP │   (uvicorn)  │
+│             │  WSS │   Proxy)    │  WS  │              │
+└─────────────┘      └─────────────┘      └──────────────┘
+                           │
+                     ┌─────┴─────┐
+                     │ SSL Cert  │
+                     │(Let's Enc)│
+                     └───────────┘
+```
+
+#### Option 1: Docker Deployment
+
+```dockerfile
+# Dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8080
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+```
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  berrypoker:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - BERRYPOKER_DATABASE_PATH=/app/data/berrypoker.db
+      - BERRYPOKER_PRODUCTION=true
+      - BERRYPOKER_CORS_ORIGINS=https://yourdomain.com
+    restart: unless-stopped
+```
+
+#### Option 2: Systemd Service
+
+```ini
+# /etc/systemd/system/berrypoker.service
+[Unit]
+Description=BerryPoker Texas Hold'em Server
+After=network.target
+
+[Service]
+Type=simple
+User=berrypoker
+WorkingDirectory=/opt/berrypoker
+Environment=BERRYPOKER_PRODUCTION=true
+Environment=BERRYPOKER_DATABASE_PATH=/var/lib/berrypoker/data.db
+ExecStart=/opt/berrypoker/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8080
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### Nginx Configuration (HTTPS + WebSocket)
+
+```nginx
+server {
+    listen 80;
+    server_name berrypoker.com www.berrypoker.com;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name berrypoker.com www.berrypoker.com;
+
+    ssl_certificate /etc/letsencrypt/live/berrypoker.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/berrypoker.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # WebSocket support
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400;
+    }
+}
+```
+
+#### SSL Certificate (Let's Encrypt)
+
+```bash
+# Install certbot
+sudo apt install certbot python3-certbot-nginx
+
+# Get certificate
+sudo certbot --nginx -d berrypoker.com -d www.berrypoker.com
+
+# Auto-renewal (add to crontab)
+0 0 * * * certbot renew --quiet
+```
+
+#### Cloud Platform Options
+
+| Platform | Pros | Cons |
+|----------|------|------|
+| **DigitalOcean** | Simple, $5/mo droplet | Manual setup |
+| **Railway** | Easy deploy, WebSocket support | May need paid plan |
+| **Render** | Free tier, auto-deploy | Cold starts |
+| **Fly.io** | Global edge, WebSocket native | Learning curve |
+| **AWS EC2** | Full control | Complex setup |
+
+#### Frontend WebSocket URL Update
+
+For production, update `static/game.js` to detect protocol:
+
+```javascript
+const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsUrl = `${wsProtocol}//${window.location.host}/ws/${roomId}`;
+```
+
+### Health Check
+
+Production deployments should use the health endpoint:
+
+```bash
+curl https://berrypoker.com/health
+# {"status": "healthy", "rooms": 5}
+```
 
 ## Future Enhancements
 

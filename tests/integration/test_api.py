@@ -306,13 +306,14 @@ class TestStatsAPI:
 class TestRoomManager:
     """Tests for RoomManager functionality."""
 
-    def test_room_manager_create_and_get(self):
+    @pytest.mark.asyncio
+    async def test_room_manager_create_and_get(self):
         """Test creating and retrieving rooms via RoomManager."""
         from main import RoomManager
         from models.schemas import RoomSettings
 
         settings = RoomSettings(small_blind=5, big_blind=10)
-        room_id = RoomManager.create_room(settings)
+        room_id = await RoomManager.create_room(settings)
 
         assert room_id is not None
         room = RoomManager.get_room(room_id)
@@ -320,12 +321,13 @@ class TestRoomManager:
         assert room.small_blind == 5
         assert room.big_blind == 10
 
-    def test_room_manager_delete(self):
+    @pytest.mark.asyncio
+    async def test_room_manager_delete(self):
         """Test deleting a room."""
         from main import RoomManager
 
-        room_id = RoomManager.create_room()
+        room_id = await RoomManager.create_room()
         assert RoomManager.get_room(room_id) is not None
 
-        RoomManager.delete_room(room_id)
+        await RoomManager.delete_room(room_id)
         assert RoomManager.get_room(room_id) is None

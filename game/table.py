@@ -892,3 +892,102 @@ class Table:
     def get_action_history(self) -> List[dict]:
         """Get the action history for current hand."""
         return [a.to_dict() for a in self.action_history]
+
+    def serialize(self) -> dict:
+        """Serialize table state to dict for persistence."""
+        return {
+            'room_id': self.room_id,
+            'small_blind': self.small_blind,
+            'big_blind': self.big_blind,
+            'min_buy_in': self.min_buy_in,
+            'max_buy_in': self.max_buy_in,
+            'phase': self.phase.value,
+            'dealer_seat': self.dealer_seat,
+            'current_player_seat': self.current_player_seat,
+            'last_aggressor_seat': self.last_aggressor_seat,
+            'current_bet': self.current_bet,
+            'last_raise_amount': self.last_raise_amount,
+            'hand_number': self.hand_number,
+            '_bb_has_option': self._bb_has_option,
+            'community_cards': [c.to_dict() for c in self.community_cards],
+            'pots': [{'amount': p.amount, 'eligible_players': p.eligible_players} for p in self.pots],
+            'players': {
+                str(seat): {
+                    'name': p.name,
+                    'seat': p.seat,
+                    'stack': p.stack,
+                    'current_bet': p.current_bet,
+                    'total_bet': p.total_bet,
+                    'is_folded': p.is_folded,
+                    'is_all_in': p.is_all_in,
+                    'is_sitting_out': p.is_sitting_out,
+                    'hole_cards': [c.to_dict() for c in p.hole_cards]
+                }
+                for seat, p in self.players.items()
+            },
+            'action_history': [a.to_dict() for a in self.action_history],
+            '_last_hand_result': self._last_hand_result
+        }
+
+    @classmethod
+    def deserialize(cls, data: dict) -> 'Table':
+        """Deserialize table state from dict."""
+        table = cls(
+            room_id=data['room_id'],
+            small_blind=data['small_blind'],
+            big_blind=data['big_blind'],
+            min_buy_in=data['min_buy_in'],
+            max_buy_in=data['max_buy_in']
+        )
+
+        table.phase = GamePhase(data['phase'])
+        table.dealer_seat = data['dealer_seat']
+        table.current_player_seat = data['current_player_seat']
+        table.last_aggressor_seat = data['last_aggressor_seat']
+        table.current_bet = data['current_bet']
+        table.last_raise_amount = data['last_raise_amount']
+        table.hand_number = data['hand_number']
+        table._bb_has_option = data.get('_bb_has_option', False)
+        table._last_hand_result = data.get('_last_hand_result')
+
+        # Restore community cards
+        table.community_cards = [
+            Card(c['suit'], c['rank']) for c in data.get('community_cards', [])
+        ]
+
+        # Restore pots
+        table.pots = [
+            Pot(amount=p['amount'], eligible_players=p['eligible_players'])
+            for p in data.get('pots', [{'amount': 0, 'eligible_players': []}])
+        ]
+
+        # Restore players
+        for seat_str, pdata in data.get('players', {}).items():
+            seat = int(seat_str)
+            player = Player(
+                name=pdata['name'],
+                seat=pdata['seat'],
+                stack=pdata['stack']
+            )
+            player.current_bet = pdata['current_bet']
+            player.total_bet = pdata['total_bet']
+            player.is_folded = pdata['is_folded']
+            player.is_all_in = pdata['is_all_in']
+            player.is_sitting_out = pdata['is_sitting_out']
+            player.hole_cards = [
+                Card(c['suit'], c['rank']) for c in pdata.get('hole_cards', [])
+            ]
+            table.players[seat] = player
+
+        # Restore action history
+        table.action_history = [
+            Action(
+                player_name=a['player'],
+                action_type=ActionType(a['action']),
+                amount=a['amount'],
+                phase=a['phase']
+            )
+            for a in data.get('action_history', [])
+        ]
+
+        return table
