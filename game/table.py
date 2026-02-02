@@ -462,15 +462,27 @@ class Table:
         # Check if betting round is complete
         active_players = [p for p in players_in_hand if not p.is_all_in]
 
-        if len(active_players) <= 1:
-            # Everyone is all-in or folded except maybe one
+        # Find next player to act
+        next_seat = self._get_next_seat(self.current_player_seat, skip_all_in=True)
+
+        # Check if all remaining players have matched the bet or are all-in
+        all_bets_matched = all(
+            p.current_bet == self.current_bet or p.is_all_in
+            for p in players_in_hand
+        )
+
+        if len(active_players) <= 1 and all_bets_matched:
+            # Everyone is all-in or folded except maybe one, and bets are settled
             # Calculate side pots and run out the board
             self._calculate_side_pots()
             self._run_out_board()
             return
 
-        # Find next player to act
-        next_seat = self._get_next_seat(self.current_player_seat, skip_all_in=True)
+        if len(active_players) == 0:
+            # Everyone is all-in, run out the board
+            self._calculate_side_pots()
+            self._run_out_board()
+            return
 
         # Check if betting round is complete
         if self._is_betting_round_complete(next_seat):

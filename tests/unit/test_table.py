@@ -416,6 +416,64 @@ class TestSidePots:
         # Side pots should be calculated
 
 
+class TestAllInResponse:
+    """Tests for responding to all-in bets."""
+
+    def test_opponent_can_call_all_in(self):
+        """When player goes all-in, opponent should get chance to call."""
+        table = Table('test-room', small_blind=1, big_blind=2)
+        table.add_player('Alice', 100, seat=0)  # Button/SB in heads-up
+        table.add_player('Bob', 100, seat=1)    # BB
+
+        table.start_hand()
+
+        # Alice (SB) goes all-in preflop
+        table.process_action('Alice', 'all_in')
+
+        # Game should NOT be over - Bob needs to respond
+        assert table.phase == GamePhase.PREFLOP
+        assert table.current_player_seat == 1  # Bob's turn
+
+        # Bob should be able to call
+        actions = table.get_valid_actions('Bob')
+        action_types = [a['action'] for a in actions]
+        assert 'call' in action_types or 'all_in' in action_types
+
+    def test_all_in_then_call_runs_board(self):
+        """After all-in and call, board should run out."""
+        table = Table('test-room', small_blind=1, big_blind=2)
+        table.add_player('Alice', 100, seat=0)
+        table.add_player('Bob', 100, seat=1)
+
+        table.start_hand()
+
+        # Alice all-in
+        table.process_action('Alice', 'all_in')
+        # Bob calls
+        table.process_action('Bob', 'call')
+
+        # Should run out board and end at showdown or waiting
+        assert table.phase in [GamePhase.SHOWDOWN, GamePhase.WAITING]
+        assert len(table.community_cards) == 5
+
+    def test_three_player_all_in_others_can_respond(self):
+        """In 3-way pot, all-in should let others respond."""
+        table = Table('test-room', small_blind=1, big_blind=2)
+        table.add_player('Alice', 100, seat=0)  # UTG
+        table.add_player('Bob', 100, seat=1)    # SB
+        table.add_player('Charlie', 100, seat=2)  # BB
+
+        table.start_hand()
+
+        # Alice (UTG) goes all-in
+        table.process_action('Alice', 'all_in')
+
+        # Game should continue - Bob and Charlie need to respond
+        assert table.phase == GamePhase.PREFLOP
+        # Bob (SB) should be next
+        assert table.current_player_seat == 1
+
+
 class TestTableActions:
     """Tests for player actions at the table."""
 
