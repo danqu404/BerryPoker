@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BerryPoker - 德州扑克</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Landing Page -->
+    <div id="landing-page" class="page">
+        <div class="landing-container">
+            <h1>🃏 BerryPoker</h1>
+            <p class="subtitle">德州扑克 · Texas Hold'em</p>
+
+            <div class="landing-form">
+                <div class="form-group">
+                    <label for="player-name">你的昵称</label>
+                    <input type="text" id="player-name" placeholder="输入昵称" maxlength="20">
+                </div>
+
+                <div class="form-group">
+                    <label for="buy-in">买入筹码</label>
+                    <input type="number" id="buy-in" value="100" min="1">
+                </div>
+
+                <div class="room-actions">
+                    <button id="create-room-btn" class="btn btn-primary">创建房间</button>
+                    <div class="divider">或</div>
+                    <div class="join-room">
+                        <input type="text" id="room-id-input" placeholder="房间ID">
+                        <button id="join-room-btn" class="btn btn-secondary">加入房间</button>
+                    </div>
+                </div>
+
+                <div id="room-settings" class="settings-panel">
+                    <h3>房间设置</h3>
+                    <div class="settings-grid">
+                        <div class="setting-item">
+                            <label>小盲注</label>
+                            <input type="number" id="small-blind" value="1" min="1">
+                        </div>
+                        <div class="setting-item">
+                            <label>大盲注</label>
+                            <input type="number" id="big-blind" value="2" min="1">
+                        </div>
+                        <div class="setting-item">
+                            <label>最小买入</label>
+                            <input type="number" id="min-buy-in" value="40" min="1">
+                        </div>
+                        <div class="setting-item">
+                            <label>最大买入</label>
+                            <input type="number" id="max-buy-in" value="200" min="1">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Game Page -->
+    <div id="game-page" class="page hidden">
+        <div class="game-header">
+            <div class="room-info">
+                <span>房间: <strong id="display-room-id"></strong></span>
+                <button id="copy-room-id" class="btn-small">复制</button>
+            </div>
+            <div class="blind-info">
+                盲注: <span id="display-blinds"></span>
+            </div>
+            <button id="leave-room-btn" class="btn btn-danger btn-small">离开</button>
+        </div>
+
+        <div class="game-container">
+            <!-- Poker Table -->
+            <div class="poker-table">
+                <div class="table-felt">
+                    <div class="pot-display">
+                        底池: <span id="pot-amount">0</span>
+                    </div>
+
+                    <div class="community-cards" id="community-cards">
+                        <!-- Community cards will be inserted here -->
+                    </div>
+
+                    <div id="dealer-button" class="dealer-button hidden">D</div>
+                </div>
+
+                <!-- Player seats -->
+                <div class="seats-container">
+                    <div class="seat seat-0" data-seat="0"></div>
+                    <div class="seat seat-1" data-seat="1"></div>
+                    <div class="seat seat-2" data-seat="2"></div>
+                    <div class="seat seat-3" data-seat="3"></div>
+                    <div class="seat seat-4" data-seat="4"></div>
+                    <div class="seat seat-5" data-seat="5"></div>
+                    <div class="seat seat-6" data-seat="6"></div>
+                    <div class="seat seat-7" data-seat="7"></div>
+                    <div class="seat seat-8" data-seat="8"></div>
+                </div>
+            </div>
+
+            <!-- Player's own cards -->
+            <div class="my-cards-container">
+                <div class="my-cards" id="my-cards">
+                    <!-- Player's hole cards -->
+                </div>
+            </div>
+
+            <!-- Action Panel -->
+            <div class="action-panel" id="action-panel">
+                <div class="action-buttons">
+                    <button id="fold-btn" class="btn btn-danger action-btn" disabled>弃牌 Fold</button>
+                    <button id="check-btn" class="btn btn-secondary action-btn" disabled>过牌 Check</button>
+                    <button id="call-btn" class="btn btn-primary action-btn" disabled>跟注 Call <span id="call-amount"></span></button>
+                    <button id="raise-btn" class="btn btn-warning action-btn" disabled>加注 Raise</button>
+                    <button id="allin-btn" class="btn btn-danger action-btn" disabled>All In</button>
+                </div>
+                <div class="raise-controls hidden" id="raise-controls">
+                    <input type="range" id="raise-slider" min="0" max="1000" value="0">
+                    <input type="number" id="raise-input" value="0">
+                    <button id="confirm-raise-btn" class="btn btn-warning">确认加注</button>
+                </div>
+            </div>
+
+            <!-- Game Controls -->
+            <div class="game-controls">
+                <button id="start-game-btn" class="btn btn-success">开始游戏</button>
+                <button id="sit-out-btn" class="btn btn-secondary">暂离</button>
+            </div>
+        </div>
+
+        <!-- Side Panel -->
+        <div class="side-panel">
+            <div class="panel-tabs">
+                <button class="tab-btn active" data-tab="actions">行动记录</button>
+                <button class="tab-btn" data-tab="chat">聊天</button>
+                <button class="tab-btn" data-tab="stats">统计</button>
+            </div>
+
+            <div class="tab-content" id="actions-tab">
+                <div class="action-log" id="action-log">
+                    <!-- Action history will be inserted here -->
+                </div>
+            </div>
+
+            <div class="tab-content hidden" id="chat-tab">
+                <div class="chat-messages" id="chat-messages">
+                    <!-- Chat messages will be inserted here -->
+                </div>
+                <div class="chat-input">
+                    <input type="text" id="chat-input" placeholder="输入消息...">
+                    <button id="send-chat-btn" class="btn btn-primary">发送</button>
+                </div>
+            </div>
+
+            <div class="tab-content hidden" id="stats-tab">
+                <div class="stats-content" id="stats-content">
+                    <!-- Stats will be inserted here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Result Modal -->
+    <div id="result-modal" class="modal hidden">
+        <div class="modal-content">
+            <h2 id="result-title">本局结果</h2>
+            <div id="result-body">
+                <!-- Results will be inserted here -->
+            </div>
+            <button id="close-result-btn" class="btn btn-primary">继续</button>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container"></div>
+
+    <script src="/static/game.js"></script>
+</body>
+</html>
