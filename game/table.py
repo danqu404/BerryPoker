@@ -14,6 +14,7 @@ class GamePhase(Enum):
     TURN = "turn"
     RIVER = "river"
     SHOWDOWN = "showdown"
+    WAITING_RUN_TWICE = "waiting_run_twice"  # Waiting for run-it-twice choices
 
 
 class ActionType(Enum):
@@ -114,6 +115,13 @@ class Table:
         self.action_history: List[Action] = []
         self._last_hand_result: Optional[dict] = None
         self._bb_has_option: bool = False  # Track if BB still has option to raise preflop
+
+        # Run it twice state
+        self._run_twice_eligible: bool = False
+        self._run_twice_choices: Dict[str, bool] = {}  # player_name -> wants_twice
+        self._run_twice_players: List[str] = []  # All-in players who can choose
+        self._saved_deck_state: Optional[List[Card]] = None  # Save deck for second run
+        self._saved_community_cards: List[Card] = []  # Cards dealt before run-twice
 
     @property
     def pot(self) -> int:
@@ -625,6 +633,25 @@ class Table:
 
     def _run_out_board(self):
         """Deal remaining community cards when no more betting possible."""
+        # Check if run-it-twice is eligible (2+ players all-in)
+        all_in_players = [p for p in self.get_players_in_hand() if p.is_all_in]
+
+        if len(all_in_players) >= 2 and len(self.community_cards) < 5:
+            # Save state for potential run-twice
+            self._run_twice_eligible = True
+            self._run_twice_choices = {}
+            self._run_twice_players = [p.name for p in all_in_players]
+            self._saved_community_cards = self.community_cards.copy()
+            self._saved_deck_state = self.deck.cards.copy()  # Save deck state
+
+            # Enter waiting for run-twice choices
+            self.phase = GamePhase.WAITING_RUN_TWICE
+            return
+
+        self._deal_remaining_and_showdown()
+
+    def _deal_remaining_and_showdown(self, is_second_run: bool = False):
+        """Deal remaining cards and go to showdown."""
         while len(self.community_cards) < 5:
             if len(self.community_cards) == 0:
                 self.community_cards.extend(self.deck.deal(3))
@@ -636,7 +663,167 @@ class Table:
                 elif len(self.community_cards) == 5:
                     self.phase = GamePhase.RIVER
 
-        self._showdown()
+        if is_second_run:
+            self._showdown_second_run()
+        else:
+            self._showdown()
+
+    def process_run_twice_choice(self, player_name: str, wants_twice: bool) -> dict:
+        """Process a player's run-it-twice choice."""
+        if self.phase != GamePhase.WAITING_RUN_TWICE:
+            return {'success': False, 'error': 'Not waiting for run-twice choice'}
+
+        if player_name not in self._run_twice_players:
+            return {'success': False, 'error': 'You are not eligible for run-twice choice'}
+
+        if player_name in self._run_twice_choices:
+            return {'success': False, 'error': 'You already made your choice'}
+
+        self._run_twice_choices[player_name] = wants_twice
+
+        # Check if all players have chosen
+        if len(self._run_twice_choices) == len(self._run_twice_players):
+            self._execute_run_twice_decision()
+
+        return {'success': True, 'waiting': len(self._run_twice_choices) < len(self._run_twice_players)}
+
+    def _execute_run_twice_decision(self):
+        """Execute the run-twice decision after all players have chosen."""
+        # If anyone chose "once", run once. Otherwise run twice.
+        run_twice = all(self._run_twice_choices.values())
+
+        if run_twice:
+            self._run_it_twice()
+        else:
+            # Run once - continue with normal showdown
+            self._run_twice_eligible = False
+            self._deal_remaining_and_showdown()
+
+    def _run_it_twice(self):
+        """Run the board twice and split pot based on results."""
+        players_in_hand = self.get_players_in_hand()
+
+        # First run - use current deck state
+        self._deal_remaining_and_showdown(is_second_run=False)
+
+        # Store first run results (winners are already determined in showdown)
+        first_run_winners = set(self._last_hand_result.get('winners', []))
+        first_community = self.community_cards.copy()
+
+        # Second run - restore deck and deal new cards
+        self.deck.cards = self._saved_deck_state.copy()
+        self.community_cards = self._saved_community_cards.copy()
+
+        # Shuffle remaining deck for second run
+        import random
+        remaining_cards = self.deck.cards
+        random.shuffle(remaining_cards)
+        self.deck.cards = remaining_cards
+
+        # Deal second run
+        second_community = self._saved_community_cards.copy()
+        while len(second_community) < 5:
+            second_community.extend(self.deck.deal(1))
+
+        # Evaluate second run
+        second_winners = self._evaluate_hands_for_community(players_in_hand, second_community)
+
+        # Determine final pot distribution
+        self._distribute_run_twice_pots(first_run_winners, second_winners, first_community, second_community)
+
+    def _evaluate_hands_for_community(self, players: List[Player], community: List[Card]) -> set:
+        """Evaluate hands for given community cards and return winner names."""
+        hand_results = []
+        for player in players:
+            if player.is_folded:
+                continue
+            best_cards, rank, tiebreakers, desc = HandEvaluator.best_hand(
+                player.hole_cards, community
+            )
+            hand_results.append({
+                'player': player,
+                'rank': rank,
+                'tiebreakers': tiebreakers
+            })
+
+        if not hand_results:
+            return set()
+
+        # Find best hand
+        hand_results.sort(key=lambda x: (x['rank'], x['tiebreakers']), reverse=True)
+        best = (hand_results[0]['rank'], hand_results[0]['tiebreakers'])
+        winners = {
+            r['player'].name for r in hand_results
+            if (r['rank'], r['tiebreakers']) == best
+        }
+        return winners
+
+    def _distribute_run_twice_pots(self, first_winners: set, second_winners: set,
+                                    first_community: List[Card], second_community: List[Card]):
+        """Distribute pots based on run-twice results."""
+        players_in_hand = self.get_players_in_hand()
+
+        if first_winners == second_winners:
+            # Same winner(s) both times - they get full pot
+            all_winners = first_winners
+            for pot in self.pots:
+                if pot.amount == 0:
+                    continue
+                eligible_winners = [p for p in players_in_hand
+                                   if p.name in pot.eligible_players and p.name in all_winners]
+                if eligible_winners:
+                    share = pot.amount // len(eligible_winners)
+                    remainder = pot.amount % len(eligible_winners)
+                    for i, winner in enumerate(eligible_winners):
+                        winner.stack += share + (1 if i < remainder else 0)
+        else:
+            # Different winners - split each pot 50/50
+            for pot in self.pots:
+                if pot.amount == 0:
+                    continue
+
+                first_half = pot.amount // 2
+                second_half = pot.amount - first_half
+
+                # First half to first run winners
+                first_eligible = [p for p in players_in_hand
+                                 if p.name in pot.eligible_players and p.name in first_winners]
+                if first_eligible:
+                    share = first_half // len(first_eligible)
+                    remainder = first_half % len(first_eligible)
+                    for i, winner in enumerate(first_eligible):
+                        winner.stack += share + (1 if i < remainder else 0)
+
+                # Second half to second run winners
+                second_eligible = [p for p in players_in_hand
+                                  if p.name in pot.eligible_players and p.name in second_winners]
+                if second_eligible:
+                    share = second_half // len(second_eligible)
+                    remainder = second_half % len(second_eligible)
+                    for i, winner in enumerate(second_eligible):
+                        winner.stack += share + (1 if i < remainder else 0)
+
+        # End hand
+        self._last_hand_result = {
+            'winners': list(first_winners | second_winners),
+            'pot': sum(p.amount for p in self.pots),
+            'run_twice': True,
+            'first_run': {
+                'winners': list(first_winners),
+                'community': [c.to_dict() for c in first_community]
+            },
+            'second_run': {
+                'winners': list(second_winners),
+                'community': [c.to_dict() for c in second_community]
+            }
+        }
+        self.phase = GamePhase.WAITING
+        self.current_player_seat = None
+        self._run_twice_eligible = False
+
+    def _showdown_second_run(self):
+        """Placeholder - actual second run handling is in _run_it_twice."""
+        pass
 
     def _end_hand_single_winner(self):
         """End hand when only one player remains (others folded)."""

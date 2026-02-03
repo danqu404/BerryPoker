@@ -521,8 +521,23 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                         }
                     })
 
+                    # Check if waiting for run-twice choice
+                    if table.phase == GamePhase.WAITING_RUN_TWICE:
+                        # Send prompt to eligible players
+                        for eligible_player in table._run_twice_players:
+                            if eligible_player in room_connections[room_id]:
+                                try:
+                                    await room_connections[room_id][eligible_player].send_json({
+                                        'type': 'run_twice_prompt',
+                                        'data': {
+                                            'eligible_players': table._run_twice_players
+                                        }
+                                    })
+                                except Exception:
+                                    pass
+
                     # Check if hand ended
-                    if table.phase == GamePhase.WAITING:
+                    elif table.phase == GamePhase.WAITING:
                         # Record hand result
                         record_hand_result(room_id, table)
 
@@ -572,6 +587,51 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                                     'type': 'error',
                                     'data': {'message': f'Max stack is {table.max_buy_in}'}
                                 })
+
+            elif msg_type == 'run_twice_choice':
+                # Handle run-it-twice choice
+                if not player_name:
+                    await websocket.send_json({
+                        'type': 'error',
+                        'data': {'message': 'Not joined'}
+                    })
+                    continue
+
+                wants_twice = msg_data.get('run_twice', False)
+
+                async with room_lock:
+                    result = table.process_run_twice_choice(player_name, wants_twice)
+
+                    if not result['success']:
+                        await websocket.send_json({
+                            'type': 'error',
+                            'data': {'message': result.get('error', 'Invalid choice')}
+                        })
+                        continue
+
+                    # Broadcast choice made
+                    await broadcast_to_room(room_id, {
+                        'type': 'run_twice_choice_made',
+                        'data': {
+                            'player_name': player_name,
+                            'wants_twice': wants_twice,
+                            'waiting_for': [p for p in table._run_twice_players
+                                          if p not in table._run_twice_choices]
+                        }
+                    })
+
+                    # Check if hand ended (all choices made)
+                    if table.phase == GamePhase.WAITING:
+                        # Record hand result
+                        record_hand_result(room_id, table)
+
+                        await broadcast_to_room(room_id, {
+                            'type': 'hand_ended',
+                            'data': table._last_hand_result if hasattr(table, '_last_hand_result') else {}
+                        })
+
+                    await send_game_state(room_id)
+                    await RoomManager.persist_room(room_id)
 
     except WebSocketDisconnect:
         # Handle disconnect

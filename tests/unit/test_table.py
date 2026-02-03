@@ -440,7 +440,7 @@ class TestAllInResponse:
         assert 'call' in action_types or 'all_in' in action_types
 
     def test_all_in_then_call_runs_board(self):
-        """After all-in and call, board should run out."""
+        """After all-in and call, board should run out (after run-twice choice)."""
         table = Table('test-room', small_blind=1, big_blind=2)
         table.add_player('Alice', 100, seat=0)
         table.add_player('Bob', 100, seat=1)
@@ -452,8 +452,15 @@ class TestAllInResponse:
         # Bob calls
         table.process_action('Bob', 'call')
 
-        # Should run out board and end at showdown or waiting
-        assert table.phase in [GamePhase.SHOWDOWN, GamePhase.WAITING]
+        # Should enter run-twice waiting phase (2+ players all-in)
+        assert table.phase == GamePhase.WAITING_RUN_TWICE
+
+        # Both players choose to run once
+        table.process_run_twice_choice('Alice', False)
+        table.process_run_twice_choice('Bob', False)
+
+        # Now should be at waiting (hand complete)
+        assert table.phase == GamePhase.WAITING
         assert len(table.community_cards) == 5
 
     def test_three_player_all_in_others_can_respond(self):
