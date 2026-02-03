@@ -204,8 +204,8 @@ body {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 10px 20px;
-    padding-right: 300px; /* Space for side panel */
+    padding: 15px 30px;
+    padding-right: 310px; /* Space for side panel */
     overflow: hidden;
 }
 
@@ -213,9 +213,9 @@ body {
 .poker-table {
     position: relative;
     width: 100%;
-    max-width: 1000px;
+    max-width: 1100px;
     height: 0;
-    padding-bottom: 55%; /* Aspect ratio */
+    padding-bottom: 50%; /* Aspect ratio - slightly less tall */
     margin-bottom: 10px;
 }
 
@@ -224,8 +224,8 @@ body {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    width: 55%;
-    height: 50%;
+    width: 48%;
+    height: 55%;
     background: radial-gradient(ellipse, #1a7f4c, var(--felt-color));
     border-radius: 50%;
     border: 12px solid #654321;
@@ -290,14 +290,15 @@ body {
 
 .seat {
     position: absolute;
-    width: 95px;
-    min-height: 75px;
+    width: 90px;
+    min-height: 70px;
     background: var(--card-bg);
     border-radius: 10px;
     padding: 6px;
     text-align: center;
     transition: all 0.3s;
     transform: translate(-50%, -50%);
+    z-index: 5;
 }
 
 .seat.empty {
@@ -348,16 +349,17 @@ body {
 }
 
 /* Seat positions - Elliptical distribution (9 seats) */
-/* Positions calculated for even distribution around ellipse */
-.seat-0 { top: 5%; left: 50%; }           /* Top center */
-.seat-1 { top: 15%; left: 82%; }          /* Top right */
-.seat-2 { top: 50%; left: 97%; }          /* Right */
-.seat-3 { top: 85%; left: 82%; }          /* Bottom right */
-.seat-4 { top: 95%; left: 50%; }          /* Bottom center */
-.seat-5 { top: 85%; left: 18%; }          /* Bottom left */
-.seat-6 { top: 50%; left: 3%; }           /* Left */
-.seat-7 { top: 15%; left: 18%; }          /* Top left */
-.seat-8 { top: 5%; left: 35%; }           /* Top left-center (for 9th seat) */
+/* Mathematically calculated for even distribution around ellipse */
+/* Ellipse: center(50%,50%), a=38%, b=36%, starting from top, clockwise */
+.seat-0 { top: 14%; left: 50%; }          /* Top center */
+.seat-1 { top: 22%; left: 74%; }          /* Top right */
+.seat-2 { top: 44%; left: 87%; }          /* Right upper */
+.seat-3 { top: 68%; left: 83%; }          /* Right lower */
+.seat-4 { top: 84%; left: 63%; }          /* Bottom right */
+.seat-5 { top: 84%; left: 37%; }          /* Bottom left */
+.seat-6 { top: 68%; left: 17%; }          /* Left lower */
+.seat-7 { top: 44%; left: 13%; }          /* Left upper */
+.seat-8 { top: 22%; left: 26%; }          /* Top left */
 
 .seat .player-position {
     position: absolute;
@@ -531,6 +533,20 @@ body {
     gap: 10px;
 }
 
+/* Rejoin/Spectator panel */
+.rejoin-panel {
+    background: var(--card-bg);
+    padding: 12px 20px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    border: 2px dashed var(--primary-color);
+    color: var(--text-muted);
+}
+
 /* Game Controls */
 .game-controls {
     display: flex;
@@ -688,6 +704,19 @@ body {
 .stat-item .stat-profit.positive { color: var(--success-color); }
 .stat-item .stat-profit.negative { color: var(--danger-color); }
 
+.stat-item.stat-inactive {
+    opacity: 0.6;
+}
+
+.stat-divider {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+    margin: 10px 0 6px;
+    padding-top: 10px;
+    border-top: 1px solid var(--secondary-color);
+}
+
 /* Modal */
 .modal {
     position: fixed;
@@ -780,19 +809,28 @@ body {
 }
 
 /* Responsive */
+@media (max-width: 1400px) {
+    .poker-table { max-width: 900px; }
+}
+
 @media (max-width: 1200px) {
     .side-panel { width: 240px; }
     .game-container { padding-right: 260px; }
+    .poker-table { max-width: 800px; }
+    .seat { width: 85px; min-height: 65px; }
 }
 
 @media (max-width: 900px) {
     .side-panel { display: none; }
     .game-container { padding-right: 20px; }
+    .poker-table { max-width: 700px; padding-bottom: 55%; }
     .seat { width: 75px; min-height: 60px; font-size: 10px; }
+    .table-felt { width: 45%; height: 50%; }
 }
 
 @media (max-width: 600px) {
-    .table-felt { width: 70%; height: 45%; }
+    .poker-table { padding-bottom: 65%; }
+    .table-felt { width: 42%; height: 45%; }
     .action-buttons { flex-direction: column; }
     .action-btn { width: 100%; }
     .seat { width: 65px; min-height: 50px; }

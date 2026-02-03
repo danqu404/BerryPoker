@@ -177,6 +177,11 @@ class Table:
         return [p for p in self.players.values()
                 if not p.is_folded and not p.is_sitting_out and len(p.hole_cards) > 0]
 
+    def get_players_who_contributed(self) -> List[Player]:
+        """Get all players who contributed to the pot (including folded players)."""
+        return [p for p in self.players.values()
+                if p.total_bet > 0 or len(p.hole_cards) > 0]
+
     def _get_seats_in_order(self) -> List[int]:
         """Get all occupied seats in clockwise order starting from seat 0."""
         return sorted(self.players.keys())
@@ -531,71 +536,81 @@ class Table:
         return True
 
     def _calculate_side_pots(self):
-        """Calculate main pot and side pots based on all-in amounts."""
-        players_in_hand = self.get_players_in_hand()
-        if not players_in_hand:
+        """Calculate main pot and side pots based on all-in amounts.
+
+        Important: Pot amounts include contributions from ALL players (including folded),
+        but only non-folded players are eligible to win.
+        """
+        # Get ALL players who contributed (including folded)
+        all_contributors = self.get_players_who_contributed()
+        players_in_hand = self.get_players_in_hand()  # Non-folded only, for eligibility
+
+        if not all_contributors:
             return
 
-        # Collect all unique bet amounts from players who went all-in
+        # Collect all unique bet amounts from players who went all-in (and are not folded)
+        # We use non-folded all-in players to determine pot levels
         all_in_amounts = sorted(set(
-            p.total_bet for p in players_in_hand if p.is_all_in
+            p.total_bet for p in all_contributors if p.is_all_in and not p.is_folded
         ))
 
         if not all_in_amounts:
             # No side pots needed, just set eligible players for main pot
+            total = sum(p.total_bet for p in all_contributors)
             self.pots = [Pot(
-                amount=self.pots[0].amount if self.pots else 0,
+                amount=total,
                 eligible_players=[p.name for p in players_in_hand]
             )]
             return
 
-        # Calculate pots
+        # Calculate pots - include ALL contributors for amounts, but only non-folded for eligibility
         new_pots = []
         prev_level = 0
-        remaining_players = players_in_hand.copy()
 
         for level in all_in_amounts:
-            contribution_per_player = level - prev_level
             pot_amount = 0
             eligible = []
 
-            for p in remaining_players:
+            for p in all_contributors:
                 if p.total_bet >= level:
-                    pot_amount += contribution_per_player
+                    # Player contributed at least up to this level
+                    contribution = level - prev_level
+                    pot_amount += contribution
+                    # Only non-folded players are eligible to win
                     if not p.is_folded:
                         eligible.append(p.name)
-                else:
-                    # Player contributed less than this level
-                    actual_contribution = max(0, p.total_bet - prev_level)
-                    pot_amount += actual_contribution
+                elif p.total_bet > prev_level:
+                    # Player contributed partially to this level
+                    contribution = p.total_bet - prev_level
+                    pot_amount += contribution
+                    # Folded players still don't get added to eligible
 
             if pot_amount > 0:
                 new_pots.append(Pot(amount=pot_amount, eligible_players=eligible))
 
-            # Remove players who are all-in at this level
-            remaining_players = [p for p in remaining_players if p.total_bet > level]
             prev_level = level
 
-        # Add remaining contributions to final pot
-        if remaining_players:
-            final_pot_amount = 0
-            eligible = []
-            for p in remaining_players:
-                contribution = p.total_bet - prev_level
-                if contribution > 0:
-                    final_pot_amount += contribution
-                    if not p.is_folded:
-                        eligible.append(p.name)
+        # Add remaining contributions (from players who bet more than highest all-in)
+        max_all_in = all_in_amounts[-1] if all_in_amounts else 0
+        final_pot_amount = 0
+        eligible = []
 
-            if final_pot_amount > 0:
-                new_pots.append(Pot(amount=final_pot_amount, eligible_players=eligible))
+        for p in all_contributors:
+            if p.total_bet > max_all_in:
+                contribution = p.total_bet - max_all_in
+                final_pot_amount += contribution
+                if not p.is_folded:
+                    eligible.append(p.name)
+
+        if final_pot_amount > 0:
+            new_pots.append(Pot(amount=final_pot_amount, eligible_players=eligible))
 
         # If no pots were created, create a single pot
         if not new_pots:
-            total = sum(p.total_bet for p in self.get_players_in_hand())
+            total = sum(p.total_bet for p in all_contributors)
             new_pots = [Pot(
                 amount=total,
-                eligible_players=[p.name for p in players_in_hand if not p.is_folded]
+                eligible_players=[p.name for p in players_in_hand]
             )]
 
         self.pots = new_pots

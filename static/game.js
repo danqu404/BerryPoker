@@ -10,14 +10,17 @@ class PokerGame {
         this.raiseMax = 0;
         this.isSeated = false;
         this.buyInAmount = 100;
+        this.isSpectating = false;  // Watching but not seated
 
         // Track hands and actions
         this.handHistory = {};  // handNumber -> {actions: [], result: {}}
         this.currentHandNumber = 0;
-        this.playerStats = {};  // playerName -> {buyIn, currentStack, profit}
+        this.playerStats = {};  // playerName -> {buyIn, currentStack, profit, isActive}
+        this.leftPlayerStats = {};  // Keep stats for players who left
 
         this.initElements();
         this.initEventListeners();
+        this.checkSessionReconnect();
     }
 
     initElements() {
@@ -97,6 +100,12 @@ class PokerGame {
         this.copyRoomIdBtn.addEventListener('click', () => this.copyRoomId());
         this.leaveRoomBtn.addEventListener('click', () => this.leaveRoom());
 
+        // Rejoin button (if exists)
+        const rejoinBtn = document.getElementById('rejoin-btn');
+        if (rejoinBtn) {
+            rejoinBtn.addEventListener('click', () => this.rejoinGame());
+        }
+
         // Actions
         this.foldBtn.addEventListener('click', () => this.sendAction('fold'));
         this.checkBtn.addEventListener('click', () => this.sendAction('check'));
@@ -135,6 +144,47 @@ class PokerGame {
         this.tabBtns.forEach(btn => {
             btn.addEventListener('click', () => this.switchTab(btn.dataset.tab));
         });
+    }
+
+    checkSessionReconnect() {
+        // Check if we have a saved session to reconnect to
+        const savedRoom = sessionStorage.getItem('berrypoker_room');
+        const savedName = sessionStorage.getItem('berrypoker_name');
+        const savedBuyIn = sessionStorage.getItem('berrypoker_buyin');
+        const savedStats = sessionStorage.getItem('berrypoker_stats');
+
+        if (savedRoom && savedName) {
+            this.roomId = savedRoom;
+            this.playerName = savedName;
+            this.buyInAmount = parseInt(savedBuyIn) || 100;
+
+            // Restore player stats
+            if (savedStats) {
+                try {
+                    this.playerStats = JSON.parse(savedStats);
+                } catch (e) {}
+            }
+
+            // Auto-reconnect
+            this.connectWebSocket(true);
+        }
+    }
+
+    saveSession() {
+        // Save session data for page refresh
+        if (this.roomId && this.playerName) {
+            sessionStorage.setItem('berrypoker_room', this.roomId);
+            sessionStorage.setItem('berrypoker_name', this.playerName);
+            sessionStorage.setItem('berrypoker_buyin', this.buyInAmount.toString());
+            sessionStorage.setItem('berrypoker_stats', JSON.stringify(this.playerStats));
+        }
+    }
+
+    clearSession() {
+        sessionStorage.removeItem('berrypoker_room');
+        sessionStorage.removeItem('berrypoker_name');
+        sessionStorage.removeItem('berrypoker_buyin');
+        sessionStorage.removeItem('berrypoker_stats');
     }
 
     async createRoom() {
@@ -184,16 +234,20 @@ class PokerGame {
         this.connectWebSocket();
     }
 
-    connectWebSocket() {
+    connectWebSocket(isReconnect = false) {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         this.ws = new WebSocket(`${protocol}//${window.location.host}/ws/${this.roomId}`);
-        this.buyInAmount = parseInt(this.buyInInput.value) || 100;
+
+        if (!isReconnect) {
+            this.buyInAmount = parseInt(this.buyInInput.value) || 100;
+        }
 
         this.ws.onopen = () => {
             this.ws.send(JSON.stringify({
                 type: 'spectate',
                 data: { player_name: this.playerName }
             }));
+            this.saveSession();
         };
 
         this.ws.onmessage = (event) => {
@@ -202,11 +256,17 @@ class PokerGame {
         };
 
         this.ws.onclose = () => {
-            this.showToast('Connection closed', 'error');
+            if (!this.isSpectating) {
+                this.showToast('Connection closed', 'error');
+            }
         };
 
         this.ws.onerror = () => {
             this.showToast('Connection error', 'error');
+            // If reconnect failed, go back to landing
+            if (isReconnect) {
+                this.clearSession();
+            }
         };
     }
 
@@ -216,11 +276,20 @@ class PokerGame {
             return;
         }
 
+        // If rejoining, ask for buy-in amount
+        let buyIn = this.buyInAmount;
+        if (this.leftPlayerStats[this.playerName]) {
+            const input = prompt('Enter buy-in amount:', this.buyInAmount);
+            if (input === null) return;  // Cancelled
+            buyIn = parseInt(input) || this.buyInAmount;
+        }
+
+        this.buyInAmount = buyIn;
         this.ws.send(JSON.stringify({
             type: 'join',
             data: {
                 player_name: this.playerName,
-                stack: this.buyInAmount,
+                stack: buyIn,
                 seat: seat
             }
         }));
@@ -230,20 +299,40 @@ class PokerGame {
         switch (message.type) {
             case 'spectating':
                 this.isSeated = false;
+                this.isSpectating = true;
                 this.showGamePage();
-                this.showToast('Click an empty seat to sit down', 'info');
+                this.updateSpectatorUI();
+                if (!this.leftPlayerStats[this.playerName]) {
+                    this.showToast('Click an empty seat to sit down', 'info');
+                }
                 break;
 
             case 'joined':
                 this.isSeated = true;
+                this.isSpectating = false;
                 this.showGamePage();
                 this.showToast(`Seated at position ${message.data.seat + 1}`, 'success');
-                // Initialize player stats with buy-in
-                this.playerStats[this.playerName] = {
-                    buyIn: this.buyInAmount,
-                    currentStack: this.buyInAmount,
-                    profit: 0
-                };
+                // Initialize player stats with buy-in (or restore from left stats)
+                if (this.leftPlayerStats[this.playerName]) {
+                    // Player rejoining - use previous buy-in for tracking
+                    const prev = this.leftPlayerStats[this.playerName];
+                    this.playerStats[this.playerName] = {
+                        buyIn: prev.buyIn + this.buyInAmount,  // Add new buy-in to total
+                        currentStack: this.buyInAmount,
+                        profit: 0,
+                        isActive: true
+                    };
+                    delete this.leftPlayerStats[this.playerName];
+                } else {
+                    this.playerStats[this.playerName] = {
+                        buyIn: this.buyInAmount,
+                        currentStack: this.buyInAmount,
+                        profit: 0,
+                        isActive: true
+                    };
+                }
+                this.saveSession();
+                this.updateSpectatorUI();
                 break;
 
             case 'error':
@@ -297,6 +386,7 @@ class PokerGame {
         this.landingPage.classList.add('hidden');
         this.gamePage.classList.remove('hidden');
         this.displayRoomId.textContent = this.roomId;
+        this.updateSpectatorUI();
     }
 
     updateGameState(state) {
@@ -344,6 +434,7 @@ class PokerGame {
 
     renderSeats(players, dealerSeat, currentPlayerSeat) {
         const occupiedSeats = new Set(players.map(p => p.seat));
+        const canSelectSeat = !this.isSeated && this.isSpectating;
 
         for (let i = 0; i < 9; i++) {
             const seatEl = document.querySelector(`.seat-${i}`);
@@ -354,7 +445,7 @@ class PokerGame {
             if (!occupiedSeats.has(i)) {
                 seatEl.classList.add('empty');
 
-                if (!this.isSeated) {
+                if (canSelectSeat) {
                     seatEl.classList.add('available');
                     seatEl.innerHTML = `
                         <div class="seat-number">Seat ${i + 1}</div>
@@ -502,15 +593,18 @@ class PokerGame {
     updateGameControls(phase) {
         const actionPanel = document.getElementById('action-panel');
         const gameControls = document.querySelector('.game-controls');
+        const rejoinPanel = document.getElementById('rejoin-panel');
 
         if (!this.isSeated) {
             actionPanel.classList.add('hidden');
             gameControls.classList.add('hidden');
+            if (rejoinPanel) rejoinPanel.classList.remove('hidden');
             return;
         }
 
         actionPanel.classList.remove('hidden');
         gameControls.classList.remove('hidden');
+        if (rejoinPanel) rejoinPanel.classList.add('hidden');
 
         if (phase === 'waiting') {
             this.startGameBtn.disabled = false;
@@ -750,11 +844,20 @@ class PokerGame {
     }
 
     updateStats(players) {
-        this.statsContent.innerHTML = players.map(p => {
+        // Build active player names set
+        const activeNames = new Set(players.map(p => p.name));
+
+        // Update active player stats
+        let statsHtml = players.map(p => {
             const stats = this.playerStats[p.name] || { buyIn: p.stack, profit: 0 };
             const profit = p.stack - stats.buyIn;
             const profitClass = profit >= 0 ? 'positive' : 'negative';
             const profitSign = profit >= 0 ? '+' : '';
+
+            // Mark as active
+            if (this.playerStats[p.name]) {
+                this.playerStats[p.name].isActive = true;
+            }
 
             return `
                 <div class="stat-item">
@@ -768,6 +871,33 @@ class PokerGame {
                 </div>
             `;
         }).join('');
+
+        // Add left players stats (greyed out)
+        const leftPlayers = Object.entries(this.leftPlayerStats)
+            .filter(([name, _]) => !activeNames.has(name));
+
+        if (leftPlayers.length > 0) {
+            statsHtml += '<div class="stat-divider">Left Players</div>';
+            statsHtml += leftPlayers.map(([name, stats]) => {
+                const profitClass = stats.profit >= 0 ? 'positive' : 'negative';
+                const profitSign = stats.profit >= 0 ? '+' : '';
+
+                return `
+                    <div class="stat-item stat-inactive">
+                        <div class="stat-header">
+                            <span>${this.escapeHtml(name)} (left)</span>
+                            <span class="stat-profit ${profitClass}">${profitSign}${stats.profit}</span>
+                        </div>
+                        <div class="stat-details">
+                            Final: ${stats.currentStack} | Buy-in: ${stats.buyIn}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        this.statsContent.innerHTML = statsHtml;
+        this.saveSession();
     }
 
     switchTab(tabId) {
@@ -811,19 +941,70 @@ class PokerGame {
     }
 
     leaveRoom() {
+        if (this.ws && this.isSeated) {
+            // Save current player's stats before leaving
+            if (this.playerName && this.playerStats[this.playerName]) {
+                this.leftPlayerStats[this.playerName] = { ...this.playerStats[this.playerName] };
+                this.leftPlayerStats[this.playerName].isActive = false;
+            }
+
+            this.ws.send(JSON.stringify({ type: 'leave' }));
+            this.isSeated = false;
+            this.isSpectating = true;
+            this.showToast('You left the table. Click Rejoin to sit back down.', 'info');
+            this.updateSpectatorUI();
+            this.saveSession();
+        }
+    }
+
+    leaveRoomCompletely() {
+        // Actually leave the room and go back to landing page
         if (this.ws) {
             this.ws.send(JSON.stringify({ type: 'leave' }));
             this.ws.close();
         }
         this.gamePage.classList.add('hidden');
         this.landingPage.classList.remove('hidden');
+        this.clearSession();
         this.roomId = null;
         this.playerName = null;
         this.gameState = null;
         this.isSeated = false;
+        this.isSpectating = false;
         this.handHistory = {};
-        this.playerStats = {};
+        // Don't clear playerStats - preserve for stats tab
         this.currentHandNumber = 0;
+    }
+
+    rejoinGame() {
+        if (!this.isSeated && this.ws && this.ws.readyState === WebSocket.OPEN) {
+            // Show seat selection - just update UI to allow clicking seats
+            this.isSpectating = true;
+            this.showToast('Click an empty seat to sit down', 'info');
+            this.updateSpectatorUI();
+        }
+    }
+
+    updateSpectatorUI() {
+        const actionPanel = document.getElementById('action-panel');
+        const gameControls = document.querySelector('.game-controls');
+        const rejoinPanel = document.getElementById('rejoin-panel');
+
+        if (this.isSeated) {
+            // Player is seated - show normal controls
+            if (actionPanel) actionPanel.classList.remove('hidden');
+            if (gameControls) gameControls.classList.remove('hidden');
+            if (rejoinPanel) rejoinPanel.classList.add('hidden');
+            this.leaveRoomBtn.textContent = 'Leave';
+            this.leaveRoomBtn.onclick = () => this.leaveRoom();
+        } else {
+            // Player is spectating - show rejoin option
+            if (actionPanel) actionPanel.classList.add('hidden');
+            if (gameControls) gameControls.classList.add('hidden');
+            if (rejoinPanel) rejoinPanel.classList.remove('hidden');
+            this.leaveRoomBtn.textContent = 'Exit Room';
+            this.leaveRoomBtn.onclick = () => this.leaveRoomCompletely();
+        }
     }
 
     showToast(message, type = 'info') {

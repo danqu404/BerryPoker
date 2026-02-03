@@ -159,17 +159,50 @@ class RoomManager:
 
     @staticmethod
     async def cleanup_old_rooms():
-        """Remove rooms that haven't been updated in a while."""
-        db_lock = get_db_lock()
+        """Remove rooms that haven't been updated in 24 hours."""
         cutoff = datetime.now() - timedelta(hours=config.ROOM_CLEANUP_HOURS)
 
-        with db_lock:
-            with get_db() as conn:
-                conn.execute(
-                    "DELETE FROM rooms WHERE updated_at < ?",
-                    (cutoff.isoformat(),)
-                )
-                conn.commit()
+        # Find and remove old rooms from memory
+        rooms_to_delete = []
+        async with rooms_global_lock:
+            db_lock = get_db_lock()
+            with db_lock:
+                with get_db() as conn:
+                    # Find old rooms in database
+                    cursor = conn.execute(
+                        "SELECT room_id FROM rooms WHERE updated_at < ?",
+                        (cutoff.isoformat(),)
+                    )
+                    old_room_ids = [row['room_id'] for row in cursor.fetchall()]
+
+                    # Delete from database
+                    if old_room_ids:
+                        conn.execute(
+                            f"DELETE FROM rooms WHERE room_id IN ({','.join('?' * len(old_room_ids))})",
+                            old_room_ids
+                        )
+                        conn.commit()
+                        rooms_to_delete = old_room_ids
+
+            # Clean up in-memory data
+            for room_id in rooms_to_delete:
+                if room_id in rooms:
+                    del rooms[room_id]
+                if room_id in room_locks:
+                    del room_locks[room_id]
+                if room_id in room_connections:
+                    # Close all connections in this room
+                    for ws in room_connections[room_id].values():
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+                    del room_connections[room_id]
+                if room_id in player_stacks_before_hand:
+                    del player_stacks_before_hand[room_id]
+
+            if rooms_to_delete:
+                print(f"Cleaned up {len(rooms_to_delete)} inactive rooms")
 
 
 async def periodic_persist():
@@ -181,6 +214,16 @@ async def periodic_persist():
                 await RoomManager.persist_room(room_id)
             except Exception as e:
                 print(f"Failed to persist room {room_id}: {e}")
+
+
+async def periodic_cleanup():
+    """Periodically clean up inactive rooms (every hour)."""
+    while True:
+        await asyncio.sleep(3600)  # Run every hour
+        try:
+            await RoomManager.cleanup_old_rooms()
+        except Exception as e:
+            print(f"Failed to clean up rooms: {e}")
 
 
 async def broadcast_to_room(room_id: str, message: dict, exclude: str = None):
@@ -256,7 +299,9 @@ async def startup_event():
     """Load persisted rooms and start background tasks."""
     await RoomManager.load_rooms_from_db()
     asyncio.create_task(periodic_persist())
+    asyncio.create_task(periodic_cleanup())
     print(f"BerryPoker server starting on {config.HOST}:{config.PORT}")
+    print(f"Rooms inactive for {config.ROOM_CLEANUP_HOURS}h will be deleted")
     if config.PRODUCTION:
         print("Running in PRODUCTION mode")
 
@@ -350,13 +395,12 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     })
                     continue
 
-                spectator_name = name
-
                 async with room_lock:
                     # Check if already seated (reconnecting)
                     existing = table.get_player_by_name(name)
                     if existing:
                         player_name = name
+                        spectator_name = name
                         is_seated = True
                         room_connections[room_id][player_name] = websocket
                         await websocket.send_json({
@@ -364,6 +408,16 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                             'data': {'player_name': player_name, 'seat': existing.seat}
                         })
                     else:
+                        # Check if name is already used by another active connection
+                        if name in room_connections[room_id]:
+                            await websocket.send_json({
+                                'type': 'error',
+                                'data': {'message': 'Name already in use in this room'}
+                            })
+                            await websocket.close()
+                            return
+
+                        spectator_name = name
                         # Send spectating confirmation
                         await websocket.send_json({
                             'type': 'spectating',
@@ -399,26 +453,36 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     continue
 
                 async with room_lock:
-                    # Check if name is already taken by another player
+                    # Check if name is already taken by another seated player
                     existing = table.get_player_by_name(name)
                     if existing:
+                        # Name exists in table
                         if existing.seat != seat:
+                            # Trying to sit at different seat with same name
                             await websocket.send_json({
                                 'type': 'error',
-                                'data': {'message': 'Name already taken'}
+                                'data': {'message': 'This name is already seated at another position'}
                             })
                             continue
-                        # Reconnecting to same seat
+                        # Reconnecting to same seat - allowed
                         player_name = name
                         is_seated = True
                         room_connections[room_id][player_name] = websocket
                     else:
+                        # Check if someone else is using this name as spectator
+                        if name in room_connections[room_id] and name != spectator_name:
+                            await websocket.send_json({
+                                'type': 'error',
+                                'data': {'message': 'This name is already in use'}
+                            })
+                            continue
+
                         # New player taking a seat
                         player = table.add_player(name, stack, seat)
                         if not player:
                             await websocket.send_json({
                                 'type': 'error',
-                                'data': {'message': 'Seat is taken or invalid'}
+                                'data': {'message': 'Seat is taken or table is full'}
                             })
                             continue
 
@@ -444,22 +508,25 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 await RoomManager.persist_room(room_id)
 
             elif msg_type == 'leave':
-                # Player leaving
+                # Player leaving seat (but may stay as spectator)
+                leaving_name = player_name
                 async with room_lock:
                     if player_name:
                         table.remove_player(player_name)
-                        if player_name in room_connections[room_id]:
-                            del room_connections[room_id][player_name]
+                        # Don't remove from room_connections - they stay as spectator
+                        is_seated = False
 
-                if player_name:
+                if leaving_name:
                     await broadcast_to_room(room_id, {
                         'type': 'player_left',
-                        'data': {'player_name': player_name}
+                        'data': {'player_name': leaving_name}
                     })
                     await send_game_state(room_id)
                     await RoomManager.persist_room(room_id)
 
+                # Player becomes spectator, keep name for potential rejoin
                 player_name = None
+                # spectator_name remains set so they can rejoin
 
             elif msg_type == 'start_game':
                 # Start a new hand
