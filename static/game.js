@@ -8,8 +8,13 @@ class PokerGame {
         this.gameState = null;
         this.raiseMin = 0;
         this.raiseMax = 0;
-        this.isSeated = false;  // Track if player has chosen a seat
+        this.isSeated = false;
         this.buyInAmount = 100;
+
+        // Track hands and actions
+        this.handHistory = {};  // handNumber -> {actions: [], result: {}}
+        this.currentHandNumber = 0;
+        this.playerStats = {};  // playerName -> {buyIn, currentStack, profit}
 
         this.initElements();
         this.initEventListeners();
@@ -37,6 +42,7 @@ class PokerGame {
         this.potAmount = document.getElementById('pot-amount');
         this.communityCards = document.getElementById('community-cards');
         this.myCards = document.getElementById('my-cards');
+        this.currentActions = document.getElementById('current-actions');
 
         // Action buttons
         this.foldBtn = document.getElementById('fold-btn');
@@ -49,12 +55,18 @@ class PokerGame {
         this.raiseInput = document.getElementById('raise-input');
         this.confirmRaiseBtn = document.getElementById('confirm-raise-btn');
 
+        // Run it twice
+        this.runTwicePanel = document.getElementById('run-twice-panel');
+        this.runOnceBtn = document.getElementById('run-once-btn');
+        this.runTwiceBtn = document.getElementById('run-twice-btn');
+
         // Game controls
         this.startGameBtn = document.getElementById('start-game-btn');
         this.sitOutBtn = document.getElementById('sit-out-btn');
 
         // Side panel
         this.actionLog = document.getElementById('action-log');
+        this.handSelect = document.getElementById('hand-select');
         this.chatMessages = document.getElementById('chat-messages');
         this.chatInput = document.getElementById('chat-input');
         this.sendChatBtn = document.getElementById('send-chat-btn');
@@ -95,9 +107,20 @@ class PokerGame {
         this.raiseSlider.addEventListener('input', () => this.updateRaiseInput());
         this.raiseInput.addEventListener('change', () => this.updateRaiseSlider());
 
+        // Run it twice
+        if (this.runOnceBtn) {
+            this.runOnceBtn.addEventListener('click', () => this.sendRunChoice(false));
+        }
+        if (this.runTwiceBtn) {
+            this.runTwiceBtn.addEventListener('click', () => this.sendRunChoice(true));
+        }
+
         // Game controls
         this.startGameBtn.addEventListener('click', () => this.startGame());
         this.sitOutBtn.addEventListener('click', () => this.toggleSitOut());
+
+        // Hand selector
+        this.handSelect.addEventListener('change', () => this.displayHandHistory());
 
         // Chat
         this.sendChatBtn.addEventListener('click', () => this.sendChat());
@@ -117,7 +140,7 @@ class PokerGame {
     async createRoom() {
         const name = this.playerNameInput.value.trim();
         if (!name) {
-            this.showToast('请输入昵称', 'error');
+            this.showToast('Please enter your name', 'error');
             return;
         }
 
@@ -139,7 +162,7 @@ class PokerGame {
             this.playerName = name;
             this.connectWebSocket();
         } catch (error) {
-            this.showToast('创建房间失败', 'error');
+            this.showToast('Failed to create room', 'error');
         }
     }
 
@@ -148,11 +171,11 @@ class PokerGame {
         const roomId = this.roomIdInput.value.trim();
 
         if (!name) {
-            this.showToast('请输入昵称', 'error');
+            this.showToast('Please enter your name', 'error');
             return;
         }
         if (!roomId) {
-            this.showToast('请输入房间ID', 'error');
+            this.showToast('Please enter room ID', 'error');
             return;
         }
 
@@ -167,12 +190,9 @@ class PokerGame {
         this.buyInAmount = parseInt(this.buyInInput.value) || 100;
 
         this.ws.onopen = () => {
-            // First, enter as spectator to see the table
             this.ws.send(JSON.stringify({
                 type: 'spectate',
-                data: {
-                    player_name: this.playerName
-                }
+                data: { player_name: this.playerName }
             }));
         };
 
@@ -182,17 +202,17 @@ class PokerGame {
         };
 
         this.ws.onclose = () => {
-            this.showToast('连接已断开', 'error');
+            this.showToast('Connection closed', 'error');
         };
 
         this.ws.onerror = () => {
-            this.showToast('连接错误', 'error');
+            this.showToast('Connection error', 'error');
         };
     }
 
     selectSeat(seat) {
         if (this.isSeated) {
-            this.showToast('你已经坐下了', 'error');
+            this.showToast('You are already seated', 'error');
             return;
         }
 
@@ -209,17 +229,21 @@ class PokerGame {
     handleMessage(message) {
         switch (message.type) {
             case 'spectating':
-                // Entered room as spectator, can now choose a seat
                 this.isSeated = false;
                 this.showGamePage();
-                this.showToast('请点击空座位坐下', 'info');
+                this.showToast('Click an empty seat to sit down', 'info');
                 break;
 
             case 'joined':
-                // Successfully sat down at a seat
                 this.isSeated = true;
                 this.showGamePage();
-                this.showToast(`已坐下 (座位 ${message.data.seat + 1})`, 'success');
+                this.showToast(`Seated at position ${message.data.seat + 1}`, 'success');
+                // Initialize player stats with buy-in
+                this.playerStats[this.playerName] = {
+                    buyIn: this.buyInAmount,
+                    currentStack: this.buyInAmount,
+                    profit: 0
+                };
                 break;
 
             case 'error':
@@ -231,21 +255,24 @@ class PokerGame {
                 break;
 
             case 'player_joined':
-                this.showToast(`${message.data.player_name} 加入了游戏`, 'info');
-                this.addActionLog(`${message.data.player_name} 加入了游戏`, 'info');
+                this.showToast(`${message.data.player_name} joined the game`, 'info');
+                this.addActionToCurrentHand(`${message.data.player_name} joined`, 'info');
                 break;
 
             case 'player_left':
-                this.showToast(`${message.data.player_name} 离开了游戏`, 'info');
-                this.addActionLog(`${message.data.player_name} 离开了游戏`, 'info');
+                this.showToast(`${message.data.player_name} left the game`, 'info');
+                this.addActionToCurrentHand(`${message.data.player_name} left`, 'info');
                 break;
 
             case 'player_disconnected':
-                this.showToast(`${message.data.player_name} 断开连接`, 'info');
+                this.showToast(`${message.data.player_name} disconnected`, 'info');
                 break;
 
             case 'hand_started':
-                this.addActionLog(`=== 第 ${message.data.hand_number} 局开始 ===`, 'info');
+                this.currentHandNumber = message.data.hand_number;
+                this.handHistory[this.currentHandNumber] = { actions: [], result: null };
+                this.updateHandSelector();
+                this.addActionToCurrentHand(`=== Hand #${message.data.hand_number} started ===`, 'info');
                 break;
 
             case 'player_action':
@@ -254,6 +281,10 @@ class PokerGame {
 
             case 'hand_ended':
                 this.showHandResult(message.data);
+                break;
+
+            case 'run_twice_prompt':
+                this.showRunTwicePrompt();
                 break;
 
             case 'chat':
@@ -294,6 +325,14 @@ class PokerGame {
 
         // Update stats
         this.updateStats(state.players);
+
+        // Update current hand actions display
+        this.updateCurrentActionsDisplay();
+
+        // Track hand number
+        if (state.hand_number && state.hand_number !== this.currentHandNumber) {
+            this.currentHandNumber = state.hand_number;
+        }
     }
 
     renderCommunityCards(cards) {
@@ -304,10 +343,8 @@ class PokerGame {
     }
 
     renderSeats(players, dealerSeat, currentPlayerSeat) {
-        // Track occupied seats
         const occupiedSeats = new Set(players.map(p => p.seat));
 
-        // Clear all seats first
         for (let i = 0; i < 9; i++) {
             const seatEl = document.querySelector(`.seat-${i}`);
             seatEl.innerHTML = '';
@@ -315,24 +352,21 @@ class PokerGame {
             seatEl.onclick = null;
 
             if (!occupiedSeats.has(i)) {
-                // Empty seat
                 seatEl.classList.add('empty');
 
                 if (!this.isSeated) {
-                    // Player can click to sit here
                     seatEl.classList.add('available');
                     seatEl.innerHTML = `
-                        <div class="seat-number">座位 ${i + 1}</div>
-                        <div class="sit-here">点击坐下</div>
+                        <div class="seat-number">Seat ${i + 1}</div>
+                        <div class="sit-here">Click to sit</div>
                     `;
                     seatEl.onclick = () => this.selectSeat(i);
                 } else {
-                    seatEl.innerHTML = `<div class="seat-number">座位 ${i + 1}</div>`;
+                    seatEl.innerHTML = `<div class="seat-number">Seat ${i + 1}</div>`;
                 }
             }
         }
 
-        // Render players
         players.forEach(player => {
             const seatEl = document.querySelector(`.seat-${player.seat}`);
             seatEl.classList.remove('empty', 'available');
@@ -354,11 +388,10 @@ class PokerGame {
             }
 
             let statusHtml = '';
-            if (player.is_folded) statusHtml = '<div class="player-status">已弃牌</div>';
+            if (player.is_folded) statusHtml = '<div class="player-status">Folded</div>';
             else if (player.is_all_in) statusHtml = '<div class="player-status">All In</div>';
-            else if (player.is_sitting_out) statusHtml = '<div class="player-status">暂离</div>';
+            else if (player.is_sitting_out) statusHtml = '<div class="player-status">Sitting Out</div>';
 
-            // Position badge
             let positionHtml = '';
             if (player.position) {
                 positionHtml = `<div class="player-position" data-pos="${player.position}">${player.position}</div>`;
@@ -368,10 +401,22 @@ class PokerGame {
                 ${positionHtml}
                 <div class="player-name">${this.escapeHtml(player.name)}</div>
                 <div class="player-stack">${player.stack}</div>
-                ${player.current_bet > 0 ? `<div class="player-bet">下注: ${player.current_bet}</div>` : ''}
+                ${player.current_bet > 0 ? `<div class="player-bet">Bet: ${player.current_bet}</div>` : ''}
                 ${cardsHtml}
                 ${statusHtml}
             `;
+
+            // Update player stats
+            if (!this.playerStats[player.name]) {
+                this.playerStats[player.name] = {
+                    buyIn: player.stack,
+                    currentStack: player.stack,
+                    profit: 0
+                };
+            } else {
+                this.playerStats[player.name].currentStack = player.stack;
+                this.playerStats[player.name].profit = player.stack - this.playerStats[player.name].buyIn;
+            }
         });
 
         // Position dealer button
@@ -382,8 +427,8 @@ class PokerGame {
             if (seatEl) {
                 const rect = seatEl.getBoundingClientRect();
                 const tableRect = document.querySelector('.poker-table').getBoundingClientRect();
-                dealerBtn.style.left = `${rect.left - tableRect.left + rect.width + 5}px`;
-                dealerBtn.style.top = `${rect.top - tableRect.top}px`;
+                dealerBtn.style.left = `${rect.left - tableRect.left + rect.width / 2 + 50}px`;
+                dealerBtn.style.top = `${rect.top - tableRect.top + rect.height / 2}px`;
             }
         }
     }
@@ -417,7 +462,6 @@ class PokerGame {
     }
 
     updateActionButtons(validActions) {
-        // Disable all buttons first
         this.foldBtn.disabled = true;
         this.checkBtn.disabled = true;
         this.callBtn.disabled = true;
@@ -456,7 +500,6 @@ class PokerGame {
     }
 
     updateGameControls(phase) {
-        // Hide controls if not seated
         const actionPanel = document.getElementById('action-panel');
         const gameControls = document.querySelector('.game-controls');
 
@@ -514,19 +557,34 @@ class PokerGame {
 
     handlePlayerAction(data) {
         const actionNames = {
-            'fold': '弃牌',
-            'check': '过牌',
-            'call': '跟注',
-            'raise': '加注',
-            'all_in': 'All In'
+            'fold': 'folds',
+            'check': 'checks',
+            'call': 'calls',
+            'raise': 'raises to',
+            'all_in': 'all-in'
         };
 
         let text = `${data.player_name} ${actionNames[data.action] || data.action}`;
-        if (data.amount > 0) {
+        if (data.amount > 0 && data.action !== 'fold' && data.action !== 'check') {
             text += ` ${data.amount}`;
         }
 
-        this.addActionLog(text, data.action);
+        this.addActionToCurrentHand(text, data.action);
+    }
+
+    addActionToCurrentHand(text, type = 'info') {
+        // Add to current hand history
+        if (this.currentHandNumber && this.handHistory[this.currentHandNumber]) {
+            this.handHistory[this.currentHandNumber].actions.push({ text, type });
+        }
+
+        // Update display if viewing current hand
+        if (this.handSelect.value === 'current') {
+            this.addActionLog(text, type);
+        }
+
+        // Update current actions display on table
+        this.updateCurrentActionsDisplay();
     }
 
     addActionLog(text, type = 'info') {
@@ -535,40 +593,137 @@ class PokerGame {
         el.innerHTML = `<span class="action-type">${this.escapeHtml(text)}</span>`;
         this.actionLog.insertBefore(el, this.actionLog.firstChild);
 
-        // Keep only last 50 items
         while (this.actionLog.children.length > 50) {
             this.actionLog.removeChild(this.actionLog.lastChild);
+        }
+    }
+
+    updateCurrentActionsDisplay() {
+        if (!this.currentActions) return;
+
+        const hand = this.handHistory[this.currentHandNumber];
+        if (!hand || !hand.actions || hand.actions.length === 0) {
+            this.currentActions.textContent = '';
+            return;
+        }
+
+        // Show last 3 actions on the table
+        const recentActions = hand.actions.slice(-3)
+            .filter(a => a.type !== 'info')
+            .map(a => a.text)
+            .join(' | ');
+        this.currentActions.textContent = recentActions;
+    }
+
+    updateHandSelector() {
+        // Add new hand to selector
+        const option = document.createElement('option');
+        option.value = this.currentHandNumber;
+        option.textContent = `Hand #${this.currentHandNumber}`;
+        this.handSelect.insertBefore(option, this.handSelect.children[1]);
+
+        // Keep selector on "Current"
+        this.handSelect.value = 'current';
+
+        // Clear action log for new hand
+        this.actionLog.innerHTML = '';
+    }
+
+    displayHandHistory() {
+        this.actionLog.innerHTML = '';
+        const selectedValue = this.handSelect.value;
+
+        if (selectedValue === 'current') {
+            // Show current hand
+            const hand = this.handHistory[this.currentHandNumber];
+            if (hand && hand.actions) {
+                hand.actions.forEach(action => {
+                    this.addActionLog(action.text, action.type);
+                });
+            }
+        } else {
+            // Show historical hand
+            const handNum = parseInt(selectedValue);
+            const hand = this.handHistory[handNum];
+            if (hand && hand.actions) {
+                hand.actions.slice().reverse().forEach(action => {
+                    this.addActionLog(action.text, action.type);
+                });
+            }
         }
     }
 
     showHandResult(result) {
         if (!result.winners || result.winners.length === 0) return;
 
+        // Save result to hand history
+        if (this.currentHandNumber && this.handHistory[this.currentHandNumber]) {
+            this.handHistory[this.currentHandNumber].result = result;
+        }
+
         const winnersText = result.winners.join(', ');
         let handDesc = '';
 
         if (result.hand_results && result.hand_results.length > 0) {
             const winnerResult = result.hand_results.find(r =>
-                result.winners.includes(r.player.name)
+                result.winners.includes(r.player_name)
             );
             if (winnerResult) {
                 handDesc = winnerResult.description;
             }
         }
 
+        // Build player results HTML
+        let playersHtml = '<div class="result-details">';
+        if (this.gameState && this.gameState.players) {
+            this.gameState.players.forEach(p => {
+                const stats = this.playerStats[p.name];
+                if (stats) {
+                    const profit = p.stack - stats.buyIn;
+                    const profitClass = profit >= 0 ? 'positive' : 'negative';
+                    const profitSign = profit >= 0 ? '+' : '';
+                    playersHtml += `
+                        <div class="result-player">
+                            <span>${this.escapeHtml(p.name)}</span>
+                            <span>Stack: ${p.stack} (Buy-in: ${stats.buyIn})</span>
+                            <span class="profit ${profitClass}">${profitSign}${profit}</span>
+                        </div>
+                    `;
+                }
+            });
+        }
+        playersHtml += '</div>';
+
         this.resultBody.innerHTML = `
             <div class="winner-display">
-                ${this.escapeHtml(winnersText)} 赢得 ${result.pot}
+                ${this.escapeHtml(winnersText)} wins ${result.pot}
             </div>
             ${handDesc ? `<div class="hand-display">${handDesc}</div>` : ''}
+            ${playersHtml}
         `;
 
         this.resultModal.classList.remove('hidden');
-        this.addActionLog(`=== ${winnersText} 赢得 ${result.pot} ===`, 'info');
+        this.addActionToCurrentHand(`=== ${winnersText} wins ${result.pot} ===`, 'info');
     }
 
     closeResultModal() {
         this.resultModal.classList.add('hidden');
+    }
+
+    showRunTwicePrompt() {
+        if (this.runTwicePanel) {
+            this.runTwicePanel.classList.remove('hidden');
+        }
+    }
+
+    sendRunChoice(runTwice) {
+        this.ws.send(JSON.stringify({
+            type: 'run_twice_choice',
+            data: { run_twice: runTwice }
+        }));
+        if (this.runTwicePanel) {
+            this.runTwicePanel.classList.add('hidden');
+        }
     }
 
     sendChat() {
@@ -595,12 +750,24 @@ class PokerGame {
     }
 
     updateStats(players) {
-        this.statsContent.innerHTML = players.map(p => `
-            <div class="stat-item">
-                <span>${this.escapeHtml(p.name)}</span>
-                <span>${p.stack}</span>
-            </div>
-        `).join('');
+        this.statsContent.innerHTML = players.map(p => {
+            const stats = this.playerStats[p.name] || { buyIn: p.stack, profit: 0 };
+            const profit = p.stack - stats.buyIn;
+            const profitClass = profit >= 0 ? 'positive' : 'negative';
+            const profitSign = profit >= 0 ? '+' : '';
+
+            return `
+                <div class="stat-item">
+                    <div class="stat-header">
+                        <span>${this.escapeHtml(p.name)}</span>
+                        <span class="stat-profit ${profitClass}">${profitSign}${profit}</span>
+                    </div>
+                    <div class="stat-details">
+                        Stack: ${p.stack} | Buy-in: ${stats.buyIn}
+                    </div>
+                </div>
+            `;
+        }).join('');
     }
 
     switchTab(tabId) {
@@ -616,9 +783,31 @@ class PokerGame {
     }
 
     copyRoomId() {
-        navigator.clipboard.writeText(this.roomId).then(() => {
-            this.showToast('房间ID已复制', 'success');
-        });
+        // Use multiple methods for clipboard copy
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(this.roomId)
+                .then(() => this.showToast('Room ID copied!', 'success'))
+                .catch(() => this.fallbackCopyRoomId());
+        } else {
+            this.fallbackCopyRoomId();
+        }
+    }
+
+    fallbackCopyRoomId() {
+        // Fallback for older browsers or non-HTTPS
+        const textArea = document.createElement('textarea');
+        textArea.value = this.roomId;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-9999px';
+        document.body.appendChild(textArea);
+        textArea.select();
+        try {
+            document.execCommand('copy');
+            this.showToast('Room ID copied!', 'success');
+        } catch (err) {
+            this.showToast('Failed to copy. Room ID: ' + this.roomId, 'error');
+        }
+        document.body.removeChild(textArea);
     }
 
     leaveRoom() {
@@ -632,6 +821,9 @@ class PokerGame {
         this.playerName = null;
         this.gameState = null;
         this.isSeated = false;
+        this.handHistory = {};
+        this.playerStats = {};
+        this.currentHandNumber = 0;
     }
 
     showToast(message, type = 'info') {
