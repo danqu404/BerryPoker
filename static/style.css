@@ -203,20 +203,22 @@ body {
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     padding: 15px 30px;
     padding-right: 310px; /* Space for side panel */
-    overflow: hidden;
+    overflow-y: auto;
+    padding-bottom: 20px;
 }
 
 /* Poker Table - Full screen */
 .poker-table {
     position: relative;
     width: 100%;
-    max-width: 1100px;
+    max-width: 1000px;
     height: 0;
-    padding-bottom: 50%; /* Aspect ratio - slightly less tall */
+    padding-bottom: 45%; /* Aspect ratio - leave room for controls */
     margin-bottom: 10px;
+    flex-shrink: 0;
 }
 
 .table-felt {
@@ -348,6 +350,51 @@ body {
     border: 2px solid var(--success-color);
 }
 
+/* Result badges above player heads */
+.result-badge {
+    position: absolute;
+    top: -45px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: bold;
+    text-align: center;
+    white-space: nowrap;
+    z-index: 20;
+    animation: fadeInBounce 0.3s ease;
+}
+
+.winner-badge {
+    background: linear-gradient(135deg, #ffd700, #ffaa00);
+    color: #333;
+    box-shadow: 0 2px 10px rgba(255, 215, 0, 0.5);
+}
+
+.winner-badge .win-amount {
+    font-size: 14px;
+    color: #006400;
+}
+
+.loser-badge {
+    background: var(--card-bg);
+    color: var(--text-muted);
+    border: 1px solid var(--secondary-color);
+}
+
+.result-badge .hand-desc {
+    font-size: 9px;
+    font-weight: normal;
+    margin-top: 2px;
+}
+
+@keyframes fadeInBounce {
+    0% { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+    50% { transform: translateX(-50%) translateY(5px); }
+    100% { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
 /* Seat positions - Elliptical distribution (9 seats) */
 /* Mathematically calculated for even distribution around ellipse */
 /* Ellipse: center(50%,50%), a=38%, b=36%, starting from top, clockwise */
@@ -461,9 +508,29 @@ body {
     font-size: 14px;
 }
 
+/* Card deal animation */
+.card.card-deal {
+    animation: cardDeal 0.4s ease-out;
+}
+
+@keyframes cardDeal {
+    0% {
+        opacity: 0;
+        transform: translateY(-30px) rotateY(90deg);
+    }
+    50% {
+        transform: translateY(0) rotateY(45deg);
+    }
+    100% {
+        opacity: 1;
+        transform: translateY(0) rotateY(0);
+    }
+}
+
 /* My Cards */
 .my-cards-container {
     margin-bottom: 10px;
+    flex-shrink: 0;
 }
 
 .my-cards {
@@ -484,6 +551,7 @@ body {
     padding: 12px 20px;
     border-radius: 12px;
     margin-bottom: 10px;
+    flex-shrink: 0;
 }
 
 .action-buttons {
@@ -531,6 +599,7 @@ body {
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-shrink: 0;
 }
 
 /* Rejoin/Spectator panel */
@@ -545,12 +614,15 @@ body {
     gap: 10px;
     border: 2px dashed var(--primary-color);
     color: var(--text-muted);
+    flex-shrink: 0;
 }
 
 /* Game Controls */
 .game-controls {
     display: flex;
     gap: 10px;
+    margin-top: 10px;
+    flex-shrink: 0;
 }
 
 /* Side Panel */

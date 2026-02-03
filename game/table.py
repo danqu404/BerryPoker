@@ -924,11 +924,12 @@ class Table:
         # Calculate total pot for result
         total_pot = sum(p.amount for p in self.pots)
 
-        # Store results for history
+        # Store results for history, including updated player stacks
         self._last_hand_result = {
             'winners': winners or [],
             'pot': total_pot,
             'pots': [p.to_dict() for p in self.pots],
+            'player_stacks': {p.name: p.stack for p in self.players.values()},
             'hand_results': [
                 {
                     'player_name': r['player'].name,

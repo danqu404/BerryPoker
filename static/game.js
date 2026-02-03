@@ -17,6 +17,10 @@ class PokerGame {
         this.currentHandNumber = 0;
         this.playerStats = {};  // playerName -> {buyIn, currentStack, profit, isActive}
         this.leftPlayerStats = {};  // Keep stats for players who left
+        this.lastHandResult = null;  // Store last hand result for display
+        this.showingResult = false;  // Flag to show result badges
+        this.previousCommunityCards = 0;  // Track previous card count for animation
+        this.isAllInRunout = false;  // Flag for all-in card animation
 
         this.initElements();
         this.initEventListeners();
@@ -398,8 +402,21 @@ class PokerGame {
         // Update pot
         this.potAmount.textContent = state.pot;
 
-        // Update community cards
-        this.renderCommunityCards(state.community_cards);
+        // Check if this is an all-in runout (multiple new cards at once)
+        const prevCardCount = this.previousCommunityCards;
+        const newCardCount = state.community_cards.length;
+        const allInPlayers = state.players.filter(p => p.is_all_in && !p.is_folded);
+        const activePlayers = state.players.filter(p => !p.is_folded && !p.is_sitting_out);
+
+        // Detect all-in runout: multiple cards added at once with all remaining players all-in
+        if (newCardCount > prevCardCount + 1 && allInPlayers.length >= 2 &&
+            allInPlayers.length === activePlayers.length) {
+            this.isAllInRunout = true;
+            this.animateCommunityCards(state.community_cards, prevCardCount);
+        } else {
+            this.renderCommunityCards(state.community_cards);
+        }
+        this.previousCommunityCards = newCardCount;
 
         // Update seats
         this.renderSeats(state.players, state.dealer_seat, state.current_player_seat);
@@ -422,6 +439,7 @@ class PokerGame {
         // Track hand number
         if (state.hand_number && state.hand_number !== this.currentHandNumber) {
             this.currentHandNumber = state.hand_number;
+            this.previousCommunityCards = 0;  // Reset for new hand
         }
     }
 
@@ -430,6 +448,48 @@ class PokerGame {
         cards.forEach(card => {
             this.communityCards.appendChild(this.createCardElement(card));
         });
+    }
+
+    animateCommunityCards(cards, startFrom) {
+        // First, render cards up to startFrom immediately
+        this.communityCards.innerHTML = '';
+        for (let i = 0; i < startFrom; i++) {
+            this.communityCards.appendChild(this.createCardElement(cards[i]));
+        }
+
+        // Then animate the remaining cards one by one
+        const newCards = cards.slice(startFrom);
+        let delay = 0;
+
+        // Group cards: flop (3 cards together), turn (1), river (1)
+        const groups = [];
+        if (startFrom === 0 && newCards.length >= 3) {
+            groups.push({ cards: newCards.slice(0, 3), delay: 500 });
+            if (newCards.length >= 4) groups.push({ cards: [newCards[3]], delay: 1500 });
+            if (newCards.length >= 5) groups.push({ cards: [newCards[4]], delay: 2500 });
+        } else if (startFrom === 3 && newCards.length >= 1) {
+            groups.push({ cards: [newCards[0]], delay: 500 });
+            if (newCards.length >= 2) groups.push({ cards: [newCards[1]], delay: 1500 });
+        } else if (startFrom === 4 && newCards.length >= 1) {
+            groups.push({ cards: [newCards[0]], delay: 500 });
+        } else {
+            // Fallback: show one by one
+            newCards.forEach((card, idx) => {
+                groups.push({ cards: [card], delay: 500 + idx * 1000 });
+            });
+        }
+
+        groups.forEach(group => {
+            setTimeout(() => {
+                group.cards.forEach(card => {
+                    const cardEl = this.createCardElement(card);
+                    cardEl.classList.add('card-deal');
+                    this.communityCards.appendChild(cardEl);
+                });
+            }, group.delay);
+        });
+
+        this.isAllInRunout = false;
     }
 
     renderSeats(players, dealerSeat, currentPlayerSeat) {
@@ -460,7 +520,7 @@ class PokerGame {
 
         players.forEach(player => {
             const seatEl = document.querySelector(`.seat-${player.seat}`);
-            seatEl.classList.remove('empty', 'available');
+            seatEl.classList.remove('empty', 'available', 'winner');
             seatEl.onclick = null;
 
             if (player.is_folded) seatEl.classList.add('folded');
@@ -488,11 +548,53 @@ class PokerGame {
                 positionHtml = `<div class="player-position" data-pos="${player.position}">${player.position}</div>`;
             }
 
+            // Result badge for hand result display
+            let resultBadgeHtml = '';
+            let displayStack = player.stack;
+            if (this.showingResult && this.lastHandResult) {
+                // Use the correct stack from hand result
+                if (this.lastHandResult.player_stacks && this.lastHandResult.player_stacks[player.name] !== undefined) {
+                    displayStack = this.lastHandResult.player_stacks[player.name];
+                }
+
+                const isWinner = this.lastHandResult.winners.includes(player.name);
+                if (isWinner) {
+                    seatEl.classList.add('winner');
+                    const winAmount = Math.floor(this.lastHandResult.pot / this.lastHandResult.winners.length);
+                    let handDesc = '';
+                    if (this.lastHandResult.hand_results) {
+                        const playerResult = this.lastHandResult.hand_results.find(r => r.player_name === player.name);
+                        if (playerResult) {
+                            handDesc = playerResult.description;
+                        }
+                    }
+                    resultBadgeHtml = `<div class="result-badge winner-badge">
+                        <div class="win-amount">+${winAmount}</div>
+                        ${handDesc ? `<div class="hand-desc">${handDesc}</div>` : ''}
+                    </div>`;
+                } else if (!player.is_folded) {
+                    // Show losing player's hand
+                    let handDesc = '';
+                    if (this.lastHandResult.hand_results) {
+                        const playerResult = this.lastHandResult.hand_results.find(r => r.player_name === player.name);
+                        if (playerResult) {
+                            handDesc = playerResult.description;
+                        }
+                    }
+                    if (handDesc) {
+                        resultBadgeHtml = `<div class="result-badge loser-badge">
+                            <div class="hand-desc">${handDesc}</div>
+                        </div>`;
+                    }
+                }
+            }
+
             seatEl.innerHTML = `
+                ${resultBadgeHtml}
                 ${positionHtml}
                 <div class="player-name">${this.escapeHtml(player.name)}</div>
-                <div class="player-stack">${player.stack}</div>
-                ${player.current_bet > 0 ? `<div class="player-bet">Bet: ${player.current_bet}</div>` : ''}
+                <div class="player-stack">${displayStack}</div>
+                ${player.current_bet > 0 && !this.showingResult ? `<div class="player-bet">Bet: ${player.current_bet}</div>` : ''}
                 ${cardsHtml}
                 ${statusHtml}
             `;
@@ -755,52 +857,30 @@ class PokerGame {
             this.handHistory[this.currentHandNumber].result = result;
         }
 
+        // Store result for display above player heads
+        this.lastHandResult = result;
+        this.showingResult = true;
+
+        // Re-render seats to show result badges
+        if (this.gameState) {
+            this.renderSeats(this.gameState.players, this.gameState.dealer_seat, null);
+        }
+
         const winnersText = result.winners.join(', ');
-        let handDesc = '';
-
-        if (result.hand_results && result.hand_results.length > 0) {
-            const winnerResult = result.hand_results.find(r =>
-                result.winners.includes(r.player_name)
-            );
-            if (winnerResult) {
-                handDesc = winnerResult.description;
-            }
-        }
-
-        // Build player results HTML
-        let playersHtml = '<div class="result-details">';
-        if (this.gameState && this.gameState.players) {
-            this.gameState.players.forEach(p => {
-                const stats = this.playerStats[p.name];
-                if (stats) {
-                    const profit = p.stack - stats.buyIn;
-                    const profitClass = profit >= 0 ? 'positive' : 'negative';
-                    const profitSign = profit >= 0 ? '+' : '';
-                    playersHtml += `
-                        <div class="result-player">
-                            <span>${this.escapeHtml(p.name)}</span>
-                            <span>Stack: ${p.stack} (Buy-in: ${stats.buyIn})</span>
-                            <span class="profit ${profitClass}">${profitSign}${profit}</span>
-                        </div>
-                    `;
-                }
-            });
-        }
-        playersHtml += '</div>';
-
-        this.resultBody.innerHTML = `
-            <div class="winner-display">
-                ${this.escapeHtml(winnersText)} wins ${result.pot}
-            </div>
-            ${handDesc ? `<div class="hand-display">${handDesc}</div>` : ''}
-            ${playersHtml}
-        `;
-
-        this.resultModal.classList.remove('hidden');
         this.addActionToCurrentHand(`=== ${winnersText} wins ${result.pot} ===`, 'info');
+
+        // Clear result display after 5 seconds
+        setTimeout(() => {
+            this.showingResult = false;
+            this.lastHandResult = null;
+            if (this.gameState) {
+                this.renderSeats(this.gameState.players, this.gameState.dealer_seat, this.gameState.current_player_seat);
+            }
+        }, 5000);
     }
 
     closeResultModal() {
+        // No longer used - keeping for compatibility
         this.resultModal.classList.add('hidden');
     }
 
