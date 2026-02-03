@@ -718,33 +718,32 @@ class Table:
         """Run the board twice and split pot based on results."""
         players_in_hand = self.get_players_in_hand()
 
-        # First run - use current deck state
-        self._deal_remaining_and_showdown(is_second_run=False)
+        # First run - deal remaining cards WITHOUT distributing pot
+        first_community = self._saved_community_cards.copy()
+        deck_copy = self._saved_deck_state.copy()
+        while len(first_community) < 5:
+            first_community.append(deck_copy.pop(0))
 
-        # Store first run results (winners are already determined in showdown)
-        first_run_winners = set(self._last_hand_result.get('winners', []))
-        first_community = self.community_cards.copy()
+        # Evaluate first run
+        first_run_winners = self._evaluate_hands_for_community(players_in_hand, first_community)
 
-        # Second run - restore deck and deal new cards
-        self.deck.cards = self._saved_deck_state.copy()
-        self.community_cards = self._saved_community_cards.copy()
-
-        # Shuffle remaining deck for second run
+        # Second run - shuffle remaining deck and deal new cards
         import random
-        remaining_cards = self.deck.cards
-        random.shuffle(remaining_cards)
-        self.deck.cards = remaining_cards
+        deck_for_second = self._saved_deck_state.copy()
+        random.shuffle(deck_for_second)
 
-        # Deal second run
         second_community = self._saved_community_cards.copy()
         while len(second_community) < 5:
-            second_community.extend(self.deck.deal(1))
+            second_community.append(deck_for_second.pop(0))
 
         # Evaluate second run
-        second_winners = self._evaluate_hands_for_community(players_in_hand, second_community)
+        second_run_winners = self._evaluate_hands_for_community(players_in_hand, second_community)
 
-        # Determine final pot distribution
-        self._distribute_run_twice_pots(first_run_winners, second_winners, first_community, second_community)
+        # Update community cards for display (show first run)
+        self.community_cards = first_community
+
+        # Distribute pot based on both runs
+        self._distribute_run_twice_pots(first_run_winners, second_run_winners, first_community, second_community)
 
     def _evaluate_hands_for_community(self, players: List[Player], community: List[Card]) -> set:
         """Evaluate hands for given community cards and return winner names."""
@@ -822,6 +821,7 @@ class Table:
         self._last_hand_result = {
             'winners': list(first_winners | second_winners),
             'pot': sum(p.amount for p in self.pots),
+            'player_stacks': {p.name: p.stack for p in self.players.values()},
             'run_twice': True,
             'first_run': {
                 'winners': list(first_winners),
