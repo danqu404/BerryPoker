@@ -22,6 +22,13 @@ class PokerGame {
         this.previousCommunityCards = 0;  // Track previous card count for animation
         this.isAllInRunout = false;  // Flag for all-in card animation
 
+        // WebRTC state
+        this.peers = {};           // { playerName: RTCPeerConnection }
+        this.remoteStreams = {};    // { playerName: MediaStream }
+        this.localStream = null;
+        this.audioEnabled = false;
+        this.videoEnabled = false;
+
         this.initElements();
         this.initEventListeners();
         this.checkSessionReconnect();
@@ -87,6 +94,11 @@ class PokerGame {
 
         // Tabs
         this.tabBtns = document.querySelectorAll('.tab-btn');
+
+        // AV Controls
+        this.toggleAudioBtn = document.getElementById('toggle-audio-btn');
+        this.toggleVideoBtn = document.getElementById('toggle-video-btn');
+        this.videoGrid = document.getElementById('video-grid');
     }
 
     initEventListeners() {
@@ -143,6 +155,10 @@ class PokerGame {
 
         // Modal
         this.closeResultBtn.addEventListener('click', () => this.closeResultModal());
+
+        // AV Controls
+        this.toggleAudioBtn.addEventListener('click', () => this.toggleAudio());
+        this.toggleVideoBtn.addEventListener('click', () => this.toggleVideo());
 
         // Tabs
         this.tabBtns.forEach(btn => {
@@ -350,15 +366,21 @@ class PokerGame {
             case 'player_joined':
                 this.showToast(`${message.data.player_name} joined the game`, 'info');
                 this.addActionToCurrentHand(`${message.data.player_name} joined`, 'info');
+                // If we are streaming, initiate a connection to the new player
+                if (this.localStream && message.data.player_name !== this.playerName) {
+                    this.initiateConnection(message.data.player_name);
+                }
                 break;
 
             case 'player_left':
                 this.showToast(`${message.data.player_name} left the game`, 'info');
                 this.addActionToCurrentHand(`${message.data.player_name} left`, 'info');
+                this.cleanupPeer(message.data.player_name);
                 break;
 
             case 'player_disconnected':
                 this.showToast(`${message.data.player_name} disconnected`, 'info');
+                this.cleanupPeer(message.data.player_name);
                 break;
 
             case 'hand_started':
@@ -382,6 +404,18 @@ class PokerGame {
 
             case 'chat':
                 this.addChatMessage(message.data.player_name, message.data.message);
+                break;
+
+            case 'webrtc_offer':
+                this.handleWebRTCOffer(message.data);
+                break;
+
+            case 'webrtc_answer':
+                this.handleWebRTCAnswer(message.data);
+                break;
+
+            case 'webrtc_ice':
+                this.handleWebRTCIce(message.data);
                 break;
         }
     }
@@ -440,6 +474,15 @@ class PokerGame {
         if (state.hand_number && state.hand_number !== this.currentHandNumber) {
             this.currentHandNumber = state.hand_number;
             this.previousCommunityCards = 0;  // Reset for new hand
+        }
+
+        // WebRTC: reconnect to peers we lost (e.g. after page refresh)
+        if (this.localStream && state.players) {
+            state.players.forEach(p => {
+                if (p.name !== this.playerName && !this.peers[p.name]) {
+                    this.initiateConnection(p.name);
+                }
+            });
         }
     }
 
@@ -990,6 +1033,14 @@ class PokerGame {
         });
 
         document.getElementById(`${tabId}-tab`).classList.remove('hidden');
+
+        // Resume any paused videos — play() may have been rejected while the
+        // video tab was display:none, leaving the elements paused (black).
+        if (tabId === 'video' && this.videoGrid) {
+            this.videoGrid.querySelectorAll('video').forEach(v => {
+                if (v.srcObject && v.paused) v.play().catch(() => {});
+            });
+        }
     }
 
     copyRoomId() {
@@ -1039,6 +1090,7 @@ class PokerGame {
 
     leaveRoomCompletely() {
         // Actually leave the room and go back to landing page
+        this.cleanupAllPeers();
         if (this.ws) {
             this.ws.send(JSON.stringify({ type: 'leave' }));
             this.ws.close();
@@ -1097,6 +1149,305 @@ class PokerGame {
         setTimeout(() => {
             toast.remove();
         }, 3000);
+    }
+
+    // ==================== WebRTC ====================
+
+    async toggleAudio() {
+        if (this.audioEnabled) {
+            this.audioEnabled = false;
+            this.toggleAudioBtn.textContent = 'Audio Off';
+            this.toggleAudioBtn.classList.remove('active');
+            if (this.localStream) {
+                this.localStream.getAudioTracks().forEach(t => t.enabled = false);
+            }
+            if (!this.videoEnabled) {
+                this.stopLocalStream();
+            }
+        } else {
+            try {
+                await this.ensureLocalStream({ audio: true });
+                this.audioEnabled = true;
+                this.toggleAudioBtn.textContent = 'Audio On';
+                this.toggleAudioBtn.classList.add('active');
+                this.reconnectAllPeers();
+            } catch (e) {
+                this.showToast('Microphone access denied', 'error');
+            }
+        }
+    }
+
+    async toggleVideo() {
+        if (this.videoEnabled) {
+            this.videoEnabled = false;
+            this.toggleVideoBtn.textContent = 'Video Off';
+            this.toggleVideoBtn.classList.remove('active');
+            if (this.localStream) {
+                this.localStream.getVideoTracks().forEach(t => {
+                    t.stop();
+                    this.localStream.removeTrack(t);
+                });
+            }
+            this.removeLocalVideoElement();
+            if (!this.audioEnabled) {
+                this.stopLocalStream();
+            } else {
+                this.reconnectAllPeers();
+            }
+        } else {
+            try {
+                await this.ensureLocalStream({ video: true });
+                this.videoEnabled = true;
+                this.toggleVideoBtn.textContent = 'Video On';
+                this.toggleVideoBtn.classList.add('active');
+                this.addLocalVideoElement();
+                this.reconnectAllPeers();
+            } catch (e) {
+                this.showToast('Camera access denied', 'error');
+            }
+        }
+    }
+
+    async ensureLocalStream(constraints) {
+        if (!this.localStream) {
+            this.localStream = await navigator.mediaDevices.getUserMedia({
+                audio: this.audioEnabled || constraints.audio || false,
+                video: constraints.video || false
+            });
+        } else {
+            if (constraints.audio && this.localStream.getAudioTracks().length === 0) {
+                const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+                s.getAudioTracks().forEach(t => this.localStream.addTrack(t));
+            }
+            if (constraints.video && this.localStream.getVideoTracks().length === 0) {
+                const s = await navigator.mediaDevices.getUserMedia({ video: true });
+                s.getVideoTracks().forEach(t => this.localStream.addTrack(t));
+            }
+            this.localStream.getAudioTracks().forEach(t => {
+                t.enabled = this.audioEnabled || !!constraints.audio;
+            });
+        }
+    }
+
+    stopLocalStream() {
+        if (this.localStream) {
+            this.localStream.getTracks().forEach(t => t.stop());
+            this.localStream = null;
+        }
+        this.cleanupAllPeers();
+        this.removeLocalVideoElement();
+    }
+
+    addLocalVideoElement() {
+        if (!this.videoGrid) return;
+        let el = document.getElementById('local-video-item');
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'video-item';
+            el.id = 'local-video-item';
+            const video = document.createElement('video');
+            video.autoplay = true;
+            video.muted = true;
+            video.playsInline = true;
+            el.appendChild(video);
+            const label = document.createElement('div');
+            label.className = 'video-label';
+            label.textContent = 'You';
+            el.appendChild(label);
+            this.videoGrid.prepend(el);
+        }
+        el.querySelector('video').srcObject = this.localStream;
+    }
+
+    removeLocalVideoElement() {
+        const el = document.getElementById('local-video-item');
+        if (el) el.remove();
+    }
+
+    // Tear down all peer connections and re-initiate with current tracks
+    reconnectAllPeers() {
+        if (!this.gameState || !this.gameState.players) return;
+        this.cleanupAllPeers();
+        this.gameState.players.forEach(p => {
+            if (p.name !== this.playerName) {
+                this.initiateConnection(p.name);
+            }
+        });
+    }
+
+    // Create a peer connection and send an explicit offer
+    async initiateConnection(remoteName) {
+        if (this.peers[remoteName]) return;
+        const pc = this.createPeerConnection(remoteName);
+        try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            this.ws.send(JSON.stringify({
+                type: 'webrtc_offer',
+                data: { target: remoteName, sdp: pc.localDescription.sdp }
+            }));
+        } catch (e) {
+            console.error('Failed to create offer for', remoteName, e);
+        }
+    }
+
+    createPeerConnection(remoteName) {
+        if (this.peers[remoteName]) {
+            return this.peers[remoteName];
+        }
+
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        });
+        this.peers[remoteName] = pc;
+
+        // Add local tracks so they are included in the SDP
+        if (this.localStream) {
+            this.localStream.getTracks().forEach(track => {
+                pc.addTrack(track, this.localStream);
+            });
+        }
+
+        // Use event.streams[0] — the browser-created stream is far more
+        // reliable than a manually constructed MediaStream for rendering.
+        pc.ontrack = (event) => {
+            const stream = (event.streams && event.streams[0])
+                ? event.streams[0]
+                : new MediaStream([event.track]);
+            this.remoteStreams[remoteName] = stream;
+            this.updateRemoteMediaElement(remoteName, stream);
+        };
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                this.ws.send(JSON.stringify({
+                    type: 'webrtc_ice',
+                    data: { target: remoteName, candidate: event.candidate.toJSON() }
+                }));
+            }
+        };
+
+        // Only clean up on hard failure; 'disconnected' is often temporary.
+        // Guard: only act if this pc is still the active one for remoteName
+        // (a new PC may have replaced it after the peer refreshed).
+        pc.onconnectionstatechange = () => {
+            if (pc.connectionState === 'failed' && this.peers[remoteName] === pc) {
+                this.cleanupPeer(remoteName);
+            }
+        };
+
+        return pc;
+    }
+
+    async handleWebRTCOffer(data) {
+        const remoteName = data.from;
+        if (!remoteName) return;
+
+        // Tear down any stale connection first (e.g. peer refreshed their page)
+        if (this.peers[remoteName]) {
+            this.cleanupPeer(remoteName);
+        }
+
+        if (this.audioEnabled || this.videoEnabled) {
+            await this.ensureLocalStream({
+                audio: this.audioEnabled,
+                video: this.videoEnabled
+            });
+        }
+
+        const pc = this.createPeerConnection(remoteName);
+
+        try {
+            await pc.setRemoteDescription(new RTCSessionDescription({
+                type: 'offer', sdp: data.sdp
+            }));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            this.ws.send(JSON.stringify({
+                type: 'webrtc_answer',
+                data: { target: remoteName, sdp: pc.localDescription.sdp }
+            }));
+        } catch (e) {
+            console.error('Error handling offer:', e);
+        }
+    }
+
+    async handleWebRTCAnswer(data) {
+        const pc = this.peers[data.from];
+        if (!pc) return;
+        try {
+            await pc.setRemoteDescription(new RTCSessionDescription({
+                type: 'answer', sdp: data.sdp
+            }));
+        } catch (e) {
+            console.error('Error handling answer:', e);
+        }
+    }
+
+    async handleWebRTCIce(data) {
+        const pc = this.peers[data.from];
+        if (!pc) return;
+        try {
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (e) {
+            console.error('Error adding ICE candidate:', e);
+        }
+    }
+
+    // Always use a <video> element (it handles audio-only streams fine).
+    // Always re-assign srcObject and call play() because:
+    //  - ontrack fires per track (audio first, video second) with the same
+    //    stream object; skipping the second call can leave video un-rendered.
+    //  - play() may have been rejected earlier if the container was hidden.
+    updateRemoteMediaElement(remoteName, stream) {
+        if (!this.videoGrid) return;
+
+        const elemId = `remote-av-${remoteName}`;
+        let el = document.getElementById(elemId);
+
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'video-item';
+            el.id = elemId;
+            const video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+            el.appendChild(video);
+            const label = document.createElement('div');
+            label.className = 'video-label';
+            label.textContent = remoteName;
+            el.appendChild(label);
+            this.videoGrid.appendChild(el);
+        }
+
+        const video = el.querySelector('video');
+        if (video) {
+            video.srcObject = stream;
+            video.play().catch(() => {});
+        }
+    }
+
+    cleanupPeer(remoteName) {
+        const pc = this.peers[remoteName];
+        if (pc) {
+            pc.ontrack = null;
+            pc.onicecandidate = null;
+            pc.onconnectionstatechange = null;
+            pc.close();
+            delete this.peers[remoteName];
+        }
+        delete this.remoteStreams[remoteName];
+        const el = document.getElementById(`remote-av-${remoteName}`);
+        if (el) el.remove();
+    }
+
+    cleanupAllPeers() {
+        for (const name of Object.keys(this.peers)) {
+            this.cleanupPeer(name);
+        }
     }
 
     escapeHtml(text) {

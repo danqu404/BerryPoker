@@ -418,6 +418,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                             return
 
                         spectator_name = name
+                        # Register in room_connections so signaling messages can reach spectators
+                        room_connections[room_id][name] = websocket
                         # Send spectating confirmation
                         await websocket.send_json({
                             'type': 'spectating',
@@ -627,6 +629,21 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                         }
                     })
 
+            elif msg_type in ('webrtc_offer', 'webrtc_answer', 'webrtc_ice'):
+                # WebRTC signaling relay — forward to target player
+                target = msg_data.get('target')
+                sender = player_name or spectator_name
+                if target and sender and room_id in room_connections:
+                    target_ws = room_connections[room_id].get(target)
+                    if target_ws:
+                        try:
+                            await target_ws.send_json({
+                                'type': msg_type,
+                                'data': {**msg_data, 'from': sender}
+                            })
+                        except Exception:
+                            pass
+
             elif msg_type == 'sit_out':
                 # Toggle sit out
                 async with room_lock:
@@ -701,22 +718,25 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     await RoomManager.persist_room(room_id)
 
     except WebSocketDisconnect:
-        # Handle disconnect
-        if player_name and room_id in room_connections:
-            if player_name in room_connections[room_id]:
-                del room_connections[room_id][player_name]
+        # Handle disconnect — clean up both seated players and spectators
+        disconnect_name = player_name or spectator_name
+        if disconnect_name and room_id in room_connections:
+            if disconnect_name in room_connections[room_id]:
+                del room_connections[room_id][disconnect_name]
 
-            # Don't remove player from table immediately (allow reconnect)
-            await broadcast_to_room(room_id, {
-                'type': 'player_disconnected',
-                'data': {'player_name': player_name}
-            })
+            if player_name:
+                # Don't remove player from table immediately (allow reconnect)
+                await broadcast_to_room(room_id, {
+                    'type': 'player_disconnected',
+                    'data': {'player_name': player_name}
+                })
 
     except Exception as e:
         print(f"WebSocket error: {e}")
-        if player_name and room_id in room_connections:
-            if player_name in room_connections[room_id]:
-                del room_connections[room_id][player_name]
+        disconnect_name = player_name or spectator_name
+        if disconnect_name and room_id in room_connections:
+            if disconnect_name in room_connections[room_id]:
+                del room_connections[room_id][disconnect_name]
 
 
 # Serve static files

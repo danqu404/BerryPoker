@@ -880,6 +880,66 @@ body {
     to { opacity: 1; transform: translateY(0); }
 }
 
+/* AV Controls */
+.av-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.av-controls .btn {
+    background: var(--secondary-color);
+    color: white;
+    transition: background 0.2s;
+}
+
+.av-controls .btn.active {
+    background: var(--success-color);
+}
+
+/* Video Grid */
+.video-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+}
+
+.video-item {
+    position: relative;
+    background: var(--darker-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.video-item video {
+    width: 100%;
+    display: block;
+    border-radius: 8px;
+    background: #000;
+}
+
+.video-item .video-label {
+    position: absolute;
+    bottom: 4px;
+    left: 4px;
+    background: rgba(0, 0, 0, 0.6);
+    color: white;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.video-item .video-muted-icon {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    background: rgba(0, 0, 0, 0.6);
+    color: var(--danger-color);
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
 /* Responsive */
 @media (max-width: 1400px) {
     .poker-table { max-width: 900px; }
